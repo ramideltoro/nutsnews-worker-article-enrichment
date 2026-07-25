@@ -40,6 +40,7 @@ import type {
   EnrichmentHttpFetchRequest,
   EnrichmentHttpFetchResponse,
   EnrichmentParsedMetadata,
+  EnrichmentStoredResult,
   EnrichmentStateStore,
   EnrichmentWorkHandler,
   EnrichmentWorkTools
@@ -64,6 +65,7 @@ export class ManualEnrichmentClock implements RuntimeClock {
 export class InMemoryEnrichmentStateStore implements EnrichmentStateStore {
   readonly name: string = "local-enrichment-state";
   status: EnrichmentDependencyProbe["status"] = "ok";
+  readonly results: EnrichmentStoredResult[] = [];
   private readonly store;
 
   constructor(clock: RuntimeClock = new ManualEnrichmentClock()) {
@@ -87,6 +89,24 @@ export class InMemoryEnrichmentStateStore implements EnrichmentStateStore {
 
   markFailed(idempotencyKey: string, failure: RuntimeIdempotencyFailure): Promise<void> {
     return this.store.markFailed(idempotencyKey, failure);
+  }
+
+  findResultByFingerprint(
+    canonicalArticleId: string,
+    articleVersion: number,
+    contentFingerprint: string,
+    transaction: EnrichmentDatabaseTransaction
+  ): Promise<EnrichmentStoredResult | undefined> {
+    void transaction;
+
+    return Promise.resolve(this.results.find((result) => result.canonicalArticleId === canonicalArticleId && result.articleVersion === articleVersion && result.contentFingerprint === contentFingerprint));
+  }
+
+  recordResult(result: EnrichmentStoredResult, transaction: EnrichmentDatabaseTransaction): Promise<EnrichmentStoredResult> {
+    void transaction;
+    this.results.push(result);
+
+    return Promise.resolve(result);
   }
 }
 
@@ -192,6 +212,7 @@ export class LocalEnrichmentHtmlParser implements EnrichmentHtmlParser {
   readonly name: string = "local-html-parser";
   status: EnrichmentDependencyProbe["status"] = "ok";
   readonly inputs: EnrichmentHtmlParseInput[] = [];
+  error: Error | undefined;
   parsed: EnrichmentParsedMetadata = {
     imageCandidates: []
   };
@@ -204,6 +225,10 @@ export class LocalEnrichmentHtmlParser implements EnrichmentHtmlParser {
   }
 
   parse(input: EnrichmentHtmlParseInput): Promise<EnrichmentParsedMetadata> {
+    if (this.error !== undefined) {
+      return Promise.reject(this.error);
+    }
+
     this.inputs.push(input);
     return Promise.resolve(this.parsed);
   }
@@ -350,7 +375,7 @@ export function createMinimalEnrichmentPayload(overrides: Readonly<Record<string
   const now = "2026-07-23T00:00:00.000Z";
 
   return {
-    schemaId: STAGE_PAYLOAD_SCHEMA_IDS.enrichmentResult,
+    schemaId: STAGE_PAYLOAD_SCHEMA_IDS.enrichmentRequest,
     schemaVersion: STAGE_PAYLOAD_SCHEMA_VERSION,
     pipelineRunId: "018f1598-2dd5-7c4f-9f92-8f7a7f8b4601",
     stageExecutionId: "018f1598-2dd5-7c4f-9f92-8f7a7f8b4702",
@@ -358,12 +383,15 @@ export function createMinimalEnrichmentPayload(overrides: Readonly<Record<string
     idempotencyKey: "canonicalizer:enrichment:candidate-world-001",
     traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
     producedAt: now,
+    requestId: "enrichment-req-001",
+    canonicalArticleId: "article-001",
+    articleVersion: 1,
     candidateId: "candidate-world-001",
     canonicalUrl: "https://articles.example.test/world/story-one",
-    imageStatus: "no_thumbnail",
-    articleMetadataRef: {
+    reason: "new",
+    payloadRef: {
       kind: "backend-record",
-      uri: "backend://worker-uplift/enrichment/candidate-world-001/metadata",
+      uri: "backend://worker-uplift/canonicalizer/article-001/enrichment-req-001",
       mediaType: "application/json"
     },
     ...overrides
@@ -384,8 +412,8 @@ export function createMinimalEnrichmentEnvelope(overrides: Partial<WorkerMessage
     traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
     idempotencyKey: "canonicalizer:enrichment:candidate-world-001",
     aggregate: {
-      type: "candidate",
-      id: "candidate-world-001",
+      type: "article",
+      id: "article-001",
       version: 1
     },
     occurredAt: now,
@@ -400,7 +428,7 @@ export function createMinimalEnrichmentEnvelope(overrides: Partial<WorkerMessage
     },
     payloadRef: {
       kind: "backend-record",
-      uri: "backend://worker-uplift/canonicalizer/candidate-world-001",
+      uri: "backend://worker-uplift/canonicalizer/article-001/enrichment-req-001",
       mediaType: "application/json",
       sizeBytes: 512
     },

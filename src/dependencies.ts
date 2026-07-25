@@ -16,6 +16,13 @@ export interface EnrichmentDependencyProbe {
 export interface EnrichmentStateStore extends RuntimeIdempotencyStore {
   readonly name: string;
   probe(): EnrichmentDependencyProbe | Promise<EnrichmentDependencyProbe>;
+  findResultByFingerprint(
+    canonicalArticleId: string,
+    articleVersion: number,
+    contentFingerprint: string,
+    transaction: EnrichmentDatabaseTransaction
+  ): Promise<EnrichmentStoredResult | undefined>;
+  recordResult(result: EnrichmentStoredResult, transaction: EnrichmentDatabaseTransaction): Promise<EnrichmentStoredResult>;
 }
 
 export interface EnrichmentDatabaseTransaction {
@@ -84,7 +91,7 @@ export interface EnrichmentHtmlParseInput {
 
 export interface EnrichmentImageCandidate {
   readonly url: string;
-  readonly source: "open_graph" | "twitter" | "json_ld" | "rss" | "html";
+  readonly source: "open_graph" | "twitter" | "json_ld" | "rss" | "srcset" | "html";
   readonly width?: number;
   readonly height?: number;
 }
@@ -96,6 +103,33 @@ export interface EnrichmentParsedMetadata {
   readonly publishedAt?: string;
   readonly language?: string;
   readonly imageCandidates: readonly EnrichmentImageCandidate[];
+}
+
+export interface EnrichmentStoredResult {
+  readonly requestId: string;
+  readonly canonicalArticleId: string;
+  readonly articleVersion: number;
+  readonly candidateId: string;
+  readonly canonicalUrl: string;
+  readonly finalUrl: string;
+  readonly contentFingerprint: string;
+  readonly imageStatus: "hydrated" | "no_thumbnail" | "transient_failure";
+  readonly imageUrl?: string;
+  readonly outcome: "image-found" | "partial" | "skipped" | "failed";
+  readonly metadataRef: {
+    readonly kind: "backend-record";
+    readonly uri: string;
+    readonly mediaType: "application/json";
+    readonly contentFingerprint: string;
+    readonly canonicalArticleId: string;
+    readonly articleVersion: number;
+    readonly title?: string;
+    readonly description?: string;
+    readonly publishedAt?: string;
+    readonly language?: string;
+    readonly failureReason?: string;
+  };
+  readonly recordedAt: string;
 }
 
 export interface EnrichmentHtmlParser {

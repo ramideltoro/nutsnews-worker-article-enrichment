@@ -5,7 +5,7 @@
 | Repository | `ramideltoro/nutsnews-worker-article-enrichment` |
 | Owner | `@ramideltoro` |
 | Responsibility | Consume canonical article jobs, enrich article state with fetchable content and metadata needed before approval, and keep enrichment output shadow-safe. |
-| Deployable / package type | Deployable service repo. Publishes immutable SHA-tagged images to `ghcr.io/ramideltoro/nutsnews-worker-article-enrichment` after implementation work adds a Dockerfile. |
+| Deployable / package type | Deployable service repo. Publishes immutable SHA-tagged images to `ghcr.io/ramideltoro/nutsnews-worker-article-enrichment`. |
 | Primary artifact | Signed GHCR image tagged only by commit SHA |
 | Support boundary | Repo-local code, tests, CI, package/image publishing, and service-local run notes. |
 | Outside boundary | Backend host runtime/deployments, Grafana Cloud resources, explanatory architecture/operations docs, production secrets, legacy ingestion. |

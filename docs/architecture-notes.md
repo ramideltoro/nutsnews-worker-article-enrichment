@@ -2,12 +2,13 @@
 
 ## Scope
 
-The article enrichment service owns the worker-uplift service boundary that consumes enrichment-stage messages on the contracted `enrichment` route. Issue #101 creates the deployable shell, dependency interfaces, health endpoints, CI/container baseline, and bounded network configuration. Later issues add article page fetch, metadata extraction, image ranking, durable result persistence, and approval request publication.
+The article enrichment service owns the worker-uplift service boundary that consumes canonicalizer-owned `enrichmentRequest` messages on the contracted `enrichment` route, fetches bounded article-page metadata through injected interfaces, stores durable metadata references, and publishes `enrichmentResult` messages for approval.
 
 ## Runtime Surfaces
 
-- Contracts: `@ramideltoro/nutsnews-worker-contracts@0.3.1`
+- Contracts: `@ramideltoro/nutsnews-worker-contracts@0.4.0`
 - Runtime: `@ramideltoro/nutsnews-worker-runtime@0.4.0`
+- Runtime contract override: force runtime's nested contracts dependency to `0.4.0` so payload validation accepts `enrichmentRequest`
 - Input route boundary: `getWorkerRoute("enrichment")`
 - Downstream publish route boundary: `getWorkerRoute("approval")`
 - Health: separate liveness, startup, and readiness probes
@@ -26,7 +27,18 @@ The article enrichment service owns the worker-uplift service boundary that cons
 8. Probe HTTP client, DNS policy, HTML parser, state, transaction, and outbox dependencies for readiness.
 9. Drain in-flight handlers before broker shutdown.
 
-The bootstrap handler is intentionally local and value-free. It does not fetch article pages, parse HTML, hydrate images, call AI providers, approve content, translate content, persist backend article rows, or publish user-facing articles.
+The handler is value-free at the broker boundary: it never emits full HTML, article bodies, credentials, or production secret values to RabbitMQ or logs. It does not call AI providers, approve content, translate content, persist backend article rows, or publish user-facing articles.
+
+## Enrichment Flow
+
+1. Validate the incoming `enrichmentRequest` payload through the shared runtime processor.
+2. Check DNS/SSRF policy before any article page fetch.
+3. Fetch the canonical URL with configured timeout, redirect, and response-size bounds.
+4. Compute a content fingerprint from safe response metadata and durable body reference.
+5. Reuse an existing stored enrichment result when the fingerprint is unchanged.
+6. Parse metadata through the injected HTML parser interface without carrying full HTML on RabbitMQ.
+7. Normalize image candidates, strip tracking parameters, reject icons/tiny/generic tracker candidates, and rank RSS, Open Graph, Twitter, JSON-LD, srcset, and HTML sources.
+8. Record a bounded metadata reference and publish an `enrichmentResult` payload to approval.
 
 ## Dependency Interfaces
 
@@ -47,6 +59,6 @@ Local doubles back tests and health probes without production dependencies. Back
 
 `NUTSNEWS_ENRICHMENT_CONCURRENCY` caps concurrent enrichment handlers. `NUTSNEWS_ENRICHMENT_PREFETCH` must be greater than or equal to concurrency.
 
-Outbound page fetch bounds are configured with connect/read/total timeouts, response-size limit, and redirect cap. These are configuration surfaces only in #101; network business logic is added by later enrichment issues.
+Outbound page fetch bounds are configured with connect/read/total timeouts, response-size limit, and redirect cap. DNS policy and parser dependencies remain injected so production implementations can enforce backend-owned network and storage controls.
 
 `NUTSNEWS_ENRICHMENT_SHADOW_MODE` remains required so bootstrap deployment cannot become the production legacy ingestion path by accident.

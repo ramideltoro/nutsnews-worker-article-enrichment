@@ -14,6 +14,7 @@ import {
   loadEnrichmentConfig,
   type EnrichmentConfig
 } from "./config.js";
+import { createArticleEnrichmentWorkHandler } from "./enrichment.js";
 import { createEnrichmentHttpServer } from "./http.js";
 import { createEnrichmentService } from "./service.js";
 import { createLocalEnrichmentDependencies } from "./test-doubles.js";
@@ -42,13 +43,22 @@ export type {
   EnrichmentImageCandidate,
   EnrichmentParsedMetadata,
   EnrichmentStateStore,
+  EnrichmentStoredResult,
   EnrichmentWorkHandler,
   EnrichmentWorkTools
 } from "./dependencies.js";
 export {
+  createArticleEnrichmentWorkHandler,
+  type ArticleEnrichmentWorkHandlerOptions
+} from "./enrichment.js";
+export {
   createEnrichmentHttpServer,
   type EnrichmentHttpServer
 } from "./http.js";
+export {
+  sha256Hex,
+  stableUuid
+} from "./ids.js";
 export {
   createEnrichmentService,
   type EnrichmentService
@@ -96,9 +106,19 @@ export function createEnrichmentApplication(config = loadEnrichmentConfig()): En
       })
     : undefined;
   const telemetry = combineTelemetrySinks(logSink, metrics);
-  const dependencies = createLocalEnrichmentDependencies({
+  const baseDependencies = createLocalEnrichmentDependencies({
     clock: SYSTEM_RUNTIME_CLOCK
   });
+  const dependencies = {
+    ...baseDependencies,
+    workHandler: createArticleEnrichmentWorkHandler({
+      config,
+      dependencies: baseDependencies,
+      ...(telemetry === undefined ? {} : {
+        telemetry
+      })
+    })
+  };
   const service = createEnrichmentService({
     config,
     dependencies,
@@ -173,7 +193,7 @@ function assertPackageCompatibility(): void {
   const contractsVersion: string = contracts.packageVersion;
   const runtimeVersion: string = runtime.packageVersion;
 
-  if (contractsVersion !== "0.3.1") {
+  if (contractsVersion !== "0.4.0") {
     throw new Error(`Unsupported contracts package version ${contractsVersion}.`);
   }
 
