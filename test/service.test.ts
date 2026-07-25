@@ -64,8 +64,10 @@ describe("createEnrichmentService", () => {
 
     expect(context.workHandler.handled).toHaveLength(1);
     expect(context.workHandler.handled[0]?.payload).toMatchObject({
+      requestId: "enrichment-req-001",
+      canonicalArticleId: "article-001",
       candidateId: "candidate-world-001",
-      imageStatus: "no_thumbnail"
+      reason: "new"
     });
 
     await context.service.stop();

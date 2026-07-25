@@ -4,9 +4,9 @@ Deployable worker-uplift article enrichment service shell for NutsNews.
 
 ## Responsibility
 
-Own the enrichment service boundary that consumes contracted enrichment-stage messages, prepares for bounded article page metadata extraction, and keeps enrichment output shadow-safe.
+Own the enrichment service boundary that consumes contracted `enrichmentRequest` messages, fetches bounded article-page metadata through injected network/parser interfaces, and publishes shadow-safe enrichment results for approval.
 
-Issue #101 bootstraps the deployable shell, not the metadata extraction business logic. The repository now provides value-free configuration, health and metrics endpoints, graceful drain, exact contracts/runtime dependencies, container publishing, and injectable HTTP, DNS policy, HTML parser, durable state, and broker interfaces.
+The service now performs DNS/SSRF policy checks, bounded article page fetch orchestration, parser-backed metadata extraction, image candidate normalization/ranking, durable result reuse by content fingerprint, and contract-backed `enrichmentResult` publication.
 
 ## Owner
 
@@ -28,10 +28,12 @@ The image runs as a non-root user, exposes port `8080`, and serves:
 
 The service consumes exact immutable worker-uplift package versions:
 
-- `@ramideltoro/nutsnews-worker-contracts@0.3.1`
+- `@ramideltoro/nutsnews-worker-contracts@0.4.0`
 - `@ramideltoro/nutsnews-worker-runtime@0.4.0`
 
 Local and CI installs use the owner-scoped GitHub Packages npm registry. No package token value is committed.
+
+This repository overrides the runtime package's nested contracts dependency to `0.4.0` so runtime payload validation recognizes `enrichmentRequest` until a later runtime release depends on that contract version directly.
 
 ## Configuration
 
@@ -57,6 +59,16 @@ Important variables:
 
 The service registers the contracted `enrichment` consumer route and downstream `approval` publish route through the shared runtime broker lifecycle. The message processor validates worker envelopes and enrichment-stage payloads, applies the durable idempotency interface, delegates work to the injected enrichment handler, and drains in-flight deliveries during shutdown.
 
+The enrichment handler:
+
+- accepts canonicalizer-owned `enrichmentRequest` payloads and never emits full HTML bodies;
+- checks DNS/SSRF policy before fetch;
+- fetches article pages with configured connect/read/total timeouts, redirect cap, and response-size limit;
+- parses bounded metadata through the injected HTML parser interface;
+- normalizes relative image URLs, strips tracking parameters, rejects icons/tiny/generic tracker candidates, and ranks RSS, Open Graph, Twitter, JSON-LD, srcset, and HTML image sources;
+- stores bounded metadata references by content fingerprint and reuses unchanged results;
+- publishes contracted `enrichmentResult` payloads with `hydrated`, `no_thumbnail`, or `transient_failure` image status.
+
 The repository includes test interfaces and local doubles for:
 
 - broker transport;
@@ -68,7 +80,7 @@ The repository includes test interfaces and local doubles for:
 - HTML metadata parser;
 - enrichment work handler.
 
-The repository does not implement identity, canonical dedupe, AI decisioning, approval, translation, persistence, publication, or production page-fetch business logic in this bootstrap issue.
+The repository does not implement identity, canonical dedupe, AI decisioning, approval, translation, persistence, publication, or user-facing article publication.
 
 ## Development
 
