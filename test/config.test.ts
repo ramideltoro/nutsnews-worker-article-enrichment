@@ -26,7 +26,15 @@ describe("loadEnrichmentConfig", () => {
         readTimeoutMs: 10_000,
         totalTimeoutMs: 30_000,
         maxResponseBytes: 1_048_576,
-        maxRedirects: 3
+        maxDecompressedBytes: 1_048_576,
+        maxDecompressionRatio: 20,
+        maxRedirects: 3,
+        maxConcurrentSockets: 32,
+        perHostConcurrency: 4
+      },
+      parser: {
+        timeoutMs: 5_000,
+        maxDomNodes: 50_000
       },
       shadowMode: true,
       dependencies: {
@@ -65,6 +73,11 @@ describe("loadEnrichmentConfig", () => {
       NUTSNEWS_ENRICHMENT_CONNECT_TIMEOUT_MS: "9000",
       NUTSNEWS_ENRICHMENT_TOTAL_TIMEOUT_MS: "5000",
       NUTSNEWS_ENRICHMENT_MAX_RESPONSE_BYTES: "10",
+      NUTSNEWS_ENRICHMENT_MAX_DECOMPRESSED_BYTES: "20000",
+      NUTSNEWS_ENRICHMENT_MAX_CONCURRENT_SOCKETS: "2",
+      NUTSNEWS_ENRICHMENT_PER_HOST_CONCURRENCY: "4",
+      NUTSNEWS_ENRICHMENT_PARSER_TIMEOUT_MS: "10",
+      NUTSNEWS_ENRICHMENT_MAX_DOM_NODES: "10",
       NUTSNEWS_ENRICHMENT_SHADOW_MODE: "false"
     })).toThrow(EnrichmentConfigError);
   });

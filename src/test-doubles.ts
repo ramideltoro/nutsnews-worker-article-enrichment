@@ -158,6 +158,7 @@ export class LocalEnrichmentHttpClient implements EnrichmentHttpClient {
   readonly name: string = "local-http-client";
   status: EnrichmentDependencyProbe["status"] = "ok";
   readonly requests: EnrichmentHttpFetchRequest[] = [];
+  error: Error | undefined;
   response: EnrichmentHttpFetchResponse | undefined;
 
   probe(): EnrichmentDependencyProbe {
@@ -170,6 +171,10 @@ export class LocalEnrichmentHttpClient implements EnrichmentHttpClient {
   fetch(request: EnrichmentHttpFetchRequest): Promise<EnrichmentHttpFetchResponse> {
     this.requests.push(request);
 
+    if (this.error !== undefined) {
+      return Promise.reject(this.error);
+    }
+
     return Promise.resolve(this.response ?? {
       finalUrl: request.url,
       statusCode: 200,
@@ -177,6 +182,10 @@ export class LocalEnrichmentHttpClient implements EnrichmentHttpClient {
         "content-type": "text/html; charset=utf-8"
       },
       bodyBytes: 0,
+      compressedBytes: 0,
+      decompressedBytes: 0,
+      encodingValid: true,
+      redirects: [],
       bodyRef: {
         kind: "backend-record",
         uri: `backend://worker-uplift/enrichment/http/${encodeURIComponent(request.url)}`,
@@ -190,6 +199,7 @@ export class LocalEnrichmentDnsPolicy implements EnrichmentDnsPolicy {
   readonly name: string = "local-dns-policy";
   status: EnrichmentDependencyProbe["status"] = "ok";
   readonly checkedUrls: string[] = [];
+  readonly decisions = new Map<string, EnrichmentDnsPolicyDecision>();
   decision: EnrichmentDnsPolicyDecision = {
     allowed: true,
     reason: "allowed"
@@ -204,7 +214,7 @@ export class LocalEnrichmentDnsPolicy implements EnrichmentDnsPolicy {
 
   checkUrl(url: string): Promise<EnrichmentDnsPolicyDecision> {
     this.checkedUrls.push(url);
-    return Promise.resolve(this.decision);
+    return Promise.resolve(this.decisions.get(url) ?? this.decision);
   }
 }
 

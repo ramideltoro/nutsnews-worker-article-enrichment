@@ -45,9 +45,18 @@ interface EnrichmentRequest {
   readonly reason: "new" | "changed";
 }
 
-interface EnrichmentProcessResult {
+type EnrichmentProcessResult = EnrichmentResultProcess | EnrichmentRetryProcess;
+
+interface EnrichmentResultProcess {
+  readonly kind: "result";
   readonly result: EnrichmentStoredResult;
   readonly reused: boolean;
+}
+
+interface EnrichmentRetryProcess {
+  readonly kind: "retry";
+  readonly reason: string;
+  readonly retryAfterMs?: number;
 }
 
 interface RankedImageCandidate {
@@ -84,6 +93,17 @@ async function handleArticleEnrichment(
 ) {
   const request = enrichmentRequestFromContext(context);
   const processed = await processRequest(request, tools, options);
+
+  if (processed.kind === "retry") {
+    return {
+      status: "retry",
+      reason: processed.reason,
+      ...(processed.retryAfterMs === undefined ? {} : {
+        retryAfterMs: processed.retryAfterMs
+      })
+    } as const;
+  }
+
   const command = approvalPublishCommand(context, processed.result, options.config);
   const receipt = await tools.publish(command);
 
@@ -106,6 +126,7 @@ async function processRequest(
     const result = await recordResult(toFailureResult(request, request.canonicalUrl, `dns-policy:${checked.reason}`, "skipped", options), tools, options);
 
     return {
+      kind: "result",
       result,
       reused: false
     };
@@ -120,12 +141,48 @@ async function processRequest(
       readTimeoutMs: options.config.fetch.readTimeoutMs,
       totalTimeoutMs: options.config.fetch.totalTimeoutMs,
       maxResponseBytes: options.config.fetch.maxResponseBytes,
-      maxRedirects: options.config.fetch.maxRedirects
+      maxDecompressedBytes: options.config.fetch.maxDecompressedBytes,
+      maxDecompressionRatio: options.config.fetch.maxDecompressionRatio,
+      maxRedirects: options.config.fetch.maxRedirects,
+      maxConcurrentSockets: options.config.fetch.maxConcurrentSockets,
+      perHostConcurrency: options.config.fetch.perHostConcurrency,
+      enforceRedirectDnsPolicy: true
     });
-  } catch {
+  } catch (error: unknown) {
+    const retry = retryableFailure(error, "fetch-error");
+
+    if (retry.retryable) {
+      return retryProcess(retry.reason, retry.retryAfterMs);
+    }
+
     const result = await recordResult(toFailureResult(request, request.canonicalUrl, "fetch-error", "failed", options), tools, options);
 
     return {
+      kind: "result",
+      result,
+      reused: false
+    };
+  }
+
+  const unsafeResponseUrl = await unsafeResponseUrlReason(request, response, options);
+
+  if (unsafeResponseUrl !== undefined) {
+    const result = await recordResult(toFailureResult(request, response.finalUrl, unsafeResponseUrl, "skipped", options), tools, options);
+
+    return {
+      kind: "result",
+      result,
+      reused: false
+    };
+  }
+
+  const boundsFailure = responseBoundsFailureReason(response, options.config);
+
+  if (boundsFailure !== undefined) {
+    const result = await recordResult(toFailureResult(request, response.finalUrl, boundsFailure, "failed", options), tools, options);
+
+    return {
+      kind: "result",
       result,
       reused: false
     };
@@ -136,6 +193,7 @@ async function processRequest(
 
   if (cached !== undefined) {
     return {
+      kind: "result",
       result: {
         ...cached,
         requestId: request.requestId,
@@ -150,6 +208,7 @@ async function processRequest(
     const result = await recordResult(toFailureResult(request, response.finalUrl, "unsupported-content-type", "skipped", options, contentFingerprint), tools, options);
 
     return {
+      kind: "result",
       result,
       reused: false
     };
@@ -161,12 +220,21 @@ async function processRequest(
     parsed = await options.dependencies.htmlParser.parse({
       canonicalArticleId: request.canonicalArticleId,
       finalUrl: response.finalUrl,
+      timeoutMs: options.config.parser.timeoutMs,
+      maxDomNodes: options.config.parser.maxDomNodes,
       htmlRef: response.bodyRef
     });
-  } catch {
+  } catch (error: unknown) {
+    const retry = retryableFailure(error, "parse-error");
+
+    if (retry.retryable) {
+      return retryProcess(retry.reason, retry.retryAfterMs);
+    }
+
     const result = await recordResult(toFailureResult(request, response.finalUrl, "parse-error", "failed", options, contentFingerprint), tools, options);
 
     return {
+      kind: "result",
       result,
       reused: false
     };
@@ -192,6 +260,7 @@ async function processRequest(
   }, tools, options);
 
   return {
+    kind: "result",
     result,
     reused: false
   };
@@ -291,6 +360,94 @@ function isHtmlResponse(response: EnrichmentHttpFetchResponse): boolean {
   const contentType = headerValue(response.headers, "content-type")?.toLowerCase() ?? "";
 
   return response.statusCode >= 200 && response.statusCode < 300 && (contentType.includes("text/html") || contentType.includes("application/xhtml+xml"));
+}
+
+async function unsafeResponseUrlReason(
+  request: EnrichmentRequest,
+  response: EnrichmentHttpFetchResponse,
+  options: ArticleEnrichmentWorkHandlerOptions
+): Promise<string | undefined> {
+  const seen = new Set<string>([
+    request.canonicalUrl
+  ]);
+  const urls = [
+    ...(response.redirects ?? []).map((redirect) => redirect.url),
+    response.finalUrl
+  ];
+
+  for (const url of urls) {
+    if (seen.has(url)) {
+      continue;
+    }
+
+    seen.add(url);
+
+    const checked = await options.dependencies.dnsPolicy.checkUrl(url);
+
+    if (!checked.allowed) {
+      return `redirect-dns-policy:${checked.reason}`;
+    }
+  }
+
+  return undefined;
+}
+
+function responseBoundsFailureReason(response: EnrichmentHttpFetchResponse, config: EnrichmentConfig): string | undefined {
+  if ((response.redirects?.length ?? 0) > config.fetch.maxRedirects) {
+    return "redirect-limit-exceeded";
+  }
+
+  if (response.encodingValid === false) {
+    return "invalid-encoding";
+  }
+
+  const decompressedBytes = response.decompressedBytes ?? response.bodyBytes;
+
+  if (response.bodyBytes > config.fetch.maxResponseBytes || decompressedBytes > config.fetch.maxDecompressedBytes) {
+    return "body-size-limit-exceeded";
+  }
+
+  if (response.compressedBytes !== undefined && response.compressedBytes > 0 && decompressedBytes / response.compressedBytes > config.fetch.maxDecompressionRatio) {
+    return "decompression-ratio-exceeded";
+  }
+
+  return undefined;
+}
+
+function retryProcess(reason: string, retryAfterMs: number | undefined): EnrichmentRetryProcess {
+  return {
+    kind: "retry",
+    reason,
+    ...(retryAfterMs === undefined ? {} : {
+      retryAfterMs
+    })
+  };
+}
+
+function retryableFailure(error: unknown, fallbackReason: string): {
+  readonly retryable: boolean;
+  readonly reason: string;
+  readonly retryAfterMs?: number;
+} {
+  if (!isRecord(error)) {
+    return {
+      retryable: false,
+      reason: fallbackReason
+    };
+  }
+
+  const reason = typeof error.reason === "string" && error.reason.length > 0 ? error.reason : fallbackReason;
+  const retryAfterMs = typeof error.retryAfterMs === "number" && Number.isFinite(error.retryAfterMs) && error.retryAfterMs >= 0
+    ? error.retryAfterMs
+    : undefined;
+
+  return {
+    retryable: error.retryable === true,
+    reason,
+    ...(retryAfterMs === undefined ? {} : {
+      retryAfterMs
+    })
+  };
 }
 
 function headerValue(headers: Readonly<Record<string, string>>, key: string): string | undefined {
@@ -533,7 +690,7 @@ function approvalPayload(
 
 async function emitEnrichmentTelemetry(
   options: ArticleEnrichmentWorkHandlerOptions,
-  processed: EnrichmentProcessResult
+  processed: EnrichmentResultProcess
 ): Promise<void> {
   const result = processed.result;
 
@@ -577,6 +734,10 @@ function stringValue(value: unknown, key: string): string {
   }
 
   return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function positiveIntegerValue(value: unknown, key: string): number {

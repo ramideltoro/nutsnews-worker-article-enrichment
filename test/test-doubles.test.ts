@@ -95,7 +95,12 @@ describe("enrichment test doubles", () => {
       readTimeoutMs: 10_000,
       totalTimeoutMs: 30_000,
       maxResponseBytes: 1_048_576,
-      maxRedirects: 3
+      maxDecompressedBytes: 1_048_576,
+      maxDecompressionRatio: 20,
+      maxRedirects: 3,
+      maxConcurrentSockets: 32,
+      perHostConcurrency: 4,
+      enforceRedirectDnsPolicy: true
     })).resolves.toMatchObject({
       finalUrl: "https://articles.example.test/story",
       statusCode: 200,
@@ -104,6 +109,8 @@ describe("enrichment test doubles", () => {
     await expect(htmlParser.parse({
       canonicalArticleId: "article-001",
       finalUrl: "https://articles.example.test/story",
+      timeoutMs: 5_000,
+      maxDomNodes: 50_000,
       htmlRef: {
         kind: "backend-record",
         uri: "backend://worker-uplift/enrichment/article-001/html",

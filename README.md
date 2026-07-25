@@ -50,7 +50,13 @@ Important variables:
 - `NUTSNEWS_ENRICHMENT_READ_TIMEOUT_MS`
 - `NUTSNEWS_ENRICHMENT_TOTAL_TIMEOUT_MS`
 - `NUTSNEWS_ENRICHMENT_MAX_RESPONSE_BYTES`
+- `NUTSNEWS_ENRICHMENT_MAX_DECOMPRESSED_BYTES`
+- `NUTSNEWS_ENRICHMENT_MAX_DECOMPRESSION_RATIO`
 - `NUTSNEWS_ENRICHMENT_MAX_REDIRECTS`
+- `NUTSNEWS_ENRICHMENT_MAX_CONCURRENT_SOCKETS`
+- `NUTSNEWS_ENRICHMENT_PER_HOST_CONCURRENCY`
+- `NUTSNEWS_ENRICHMENT_PARSER_TIMEOUT_MS`
+- `NUTSNEWS_ENRICHMENT_MAX_DOM_NODES`
 - `NUTSNEWS_ENRICHMENT_SHADOW_MODE`
 
 `NUTSNEWS_ENRICHMENT_SHADOW_MODE` must remain `true` until backend-owned cutover work explicitly changes the deployment contract.
@@ -62,9 +68,11 @@ The service registers the contracted `enrichment` consumer route and downstream 
 The enrichment handler:
 
 - accepts canonicalizer-owned `enrichmentRequest` payloads and never emits full HTML bodies;
-- checks DNS/SSRF policy before fetch;
-- fetches article pages with configured connect/read/total timeouts, redirect cap, and response-size limit;
+- checks DNS/SSRF policy before fetch and for every observed redirect/final URL;
+- fetches article pages with configured connect/read/total timeouts, redirect cap, response-size/decompression limits, and socket/per-host concurrency bounds;
 - parses bounded metadata through the injected HTML parser interface;
+- propagates parser timeout and DOM-node budgets to the parser;
+- classifies retryable fetch/parser failures into runtime retry/DLQ handling without publishing approval work;
 - normalizes relative image URLs, strips tracking parameters, rejects icons/tiny/generic tracker candidates, and ranks RSS, Open Graph, Twitter, JSON-LD, srcset, and HTML image sources;
 - stores bounded metadata references by content fingerprint and reuses unchanged results;
 - publishes contracted `enrichmentResult` payloads with `hydrated`, `no_thumbnail`, or `transient_failure` image status.
