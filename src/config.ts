@@ -27,7 +27,13 @@ export const ENRICHMENT_CONFIG_SCHEMA = [
   variable("NUTSNEWS_ENRICHMENT_READ_TIMEOUT_MS", "Maximum outbound read timeout in milliseconds.", false, false, "10000"),
   variable("NUTSNEWS_ENRICHMENT_TOTAL_TIMEOUT_MS", "Maximum total page fetch timeout in milliseconds.", false, false, "30000"),
   variable("NUTSNEWS_ENRICHMENT_MAX_RESPONSE_BYTES", "Maximum article page response size accepted by enrichment.", false, false, "1048576"),
+  variable("NUTSNEWS_ENRICHMENT_MAX_DECOMPRESSED_BYTES", "Maximum decompressed article page size accepted by enrichment.", false, false, "1048576"),
+  variable("NUTSNEWS_ENRICHMENT_MAX_DECOMPRESSION_RATIO", "Maximum accepted decompressed-to-compressed response ratio.", false, false, "20"),
   variable("NUTSNEWS_ENRICHMENT_MAX_REDIRECTS", "Maximum article page redirect hops.", false, false, "3"),
+  variable("NUTSNEWS_ENRICHMENT_MAX_CONCURRENT_SOCKETS", "Maximum concurrent outbound sockets for enrichment fetchers.", false, false, "32"),
+  variable("NUTSNEWS_ENRICHMENT_PER_HOST_CONCURRENCY", "Maximum concurrent outbound fetches per host.", false, false, "4"),
+  variable("NUTSNEWS_ENRICHMENT_PARSER_TIMEOUT_MS", "Maximum parser runtime per article page.", false, false, "5000"),
+  variable("NUTSNEWS_ENRICHMENT_MAX_DOM_NODES", "Maximum DOM node budget for article-page parsing.", false, false, "50000"),
   variable("NUTSNEWS_ENRICHMENT_SHUTDOWN_TIMEOUT_MS", "Graceful shutdown drain timeout in milliseconds.", false, false, "30000"),
   variable("NUTSNEWS_ENRICHMENT_SHADOW_MODE", "Keep enrichment output isolated from legacy ingestion.", false, false, "true"),
   variable("NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS", "Structured runtime log sink mode.", false, false, "stdout"),
@@ -55,7 +61,15 @@ export interface EnrichmentConfig {
     readonly readTimeoutMs: number;
     readonly totalTimeoutMs: number;
     readonly maxResponseBytes: number;
+    readonly maxDecompressedBytes: number;
+    readonly maxDecompressionRatio: number;
     readonly maxRedirects: number;
+    readonly maxConcurrentSockets: number;
+    readonly perHostConcurrency: number;
+  };
+  readonly parser: {
+    readonly timeoutMs: number;
+    readonly maxDomNodes: number;
   };
   readonly shutdownTimeoutMs: number;
   readonly shadowMode: boolean;
@@ -93,7 +107,15 @@ export function loadEnrichmentConfig(env: NodeJS.ProcessEnv = process.env): Enri
     readTimeoutMs: parseInteger(env.NUTSNEWS_ENRICHMENT_READ_TIMEOUT_MS, "NUTSNEWS_ENRICHMENT_READ_TIMEOUT_MS", 10_000, 1_000, 60_000, issues),
     totalTimeoutMs: parseInteger(env.NUTSNEWS_ENRICHMENT_TOTAL_TIMEOUT_MS, "NUTSNEWS_ENRICHMENT_TOTAL_TIMEOUT_MS", 30_000, 1_000, 120_000, issues),
     maxResponseBytes: parseInteger(env.NUTSNEWS_ENRICHMENT_MAX_RESPONSE_BYTES, "NUTSNEWS_ENRICHMENT_MAX_RESPONSE_BYTES", 1_048_576, 16_384, 16_777_216, issues),
-    maxRedirects: parseInteger(env.NUTSNEWS_ENRICHMENT_MAX_REDIRECTS, "NUTSNEWS_ENRICHMENT_MAX_REDIRECTS", 3, 0, 10, issues)
+    maxDecompressedBytes: parseInteger(env.NUTSNEWS_ENRICHMENT_MAX_DECOMPRESSED_BYTES, "NUTSNEWS_ENRICHMENT_MAX_DECOMPRESSED_BYTES", 1_048_576, 16_384, 16_777_216, issues),
+    maxDecompressionRatio: parseInteger(env.NUTSNEWS_ENRICHMENT_MAX_DECOMPRESSION_RATIO, "NUTSNEWS_ENRICHMENT_MAX_DECOMPRESSION_RATIO", 20, 1, 100, issues),
+    maxRedirects: parseInteger(env.NUTSNEWS_ENRICHMENT_MAX_REDIRECTS, "NUTSNEWS_ENRICHMENT_MAX_REDIRECTS", 3, 0, 10, issues),
+    maxConcurrentSockets: parseInteger(env.NUTSNEWS_ENRICHMENT_MAX_CONCURRENT_SOCKETS, "NUTSNEWS_ENRICHMENT_MAX_CONCURRENT_SOCKETS", 32, 1, 512, issues),
+    perHostConcurrency: parseInteger(env.NUTSNEWS_ENRICHMENT_PER_HOST_CONCURRENCY, "NUTSNEWS_ENRICHMENT_PER_HOST_CONCURRENCY", 4, 1, 128, issues)
+  };
+  const parser = {
+    timeoutMs: parseInteger(env.NUTSNEWS_ENRICHMENT_PARSER_TIMEOUT_MS, "NUTSNEWS_ENRICHMENT_PARSER_TIMEOUT_MS", 5_000, 100, 60_000, issues),
+    maxDomNodes: parseInteger(env.NUTSNEWS_ENRICHMENT_MAX_DOM_NODES, "NUTSNEWS_ENRICHMENT_MAX_DOM_NODES", 50_000, 100, 1_000_000, issues)
   };
   const config: EnrichmentConfig = {
     serviceName: ENRICHMENT_SERVICE_NAME,
@@ -109,6 +131,7 @@ export function loadEnrichmentConfig(env: NodeJS.ProcessEnv = process.env): Enri
     concurrency,
     prefetch,
     fetch,
+    parser,
     shutdownTimeoutMs: parseInteger(env.NUTSNEWS_ENRICHMENT_SHUTDOWN_TIMEOUT_MS, "NUTSNEWS_ENRICHMENT_SHUTDOWN_TIMEOUT_MS", 30_000, 1_000, 600_000, issues),
     shadowMode: parseBoolean(env.NUTSNEWS_ENRICHMENT_SHADOW_MODE, "NUTSNEWS_ENRICHMENT_SHADOW_MODE", true, issues),
     telemetryLogs: parseTelemetryLogMode(env.NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS, issues),
@@ -121,6 +144,14 @@ export function loadEnrichmentConfig(env: NodeJS.ProcessEnv = process.env): Enri
 
   if (config.fetch.totalTimeoutMs < config.fetch.connectTimeoutMs || config.fetch.totalTimeoutMs < config.fetch.readTimeoutMs) {
     issues.push("NUTSNEWS_ENRICHMENT_TOTAL_TIMEOUT_MS must be greater than or equal to connect and read timeouts.");
+  }
+
+  if (config.fetch.maxDecompressedBytes < config.fetch.maxResponseBytes) {
+    issues.push("NUTSNEWS_ENRICHMENT_MAX_DECOMPRESSED_BYTES must be greater than or equal to NUTSNEWS_ENRICHMENT_MAX_RESPONSE_BYTES.");
+  }
+
+  if (config.fetch.maxConcurrentSockets < config.fetch.perHostConcurrency) {
+    issues.push("NUTSNEWS_ENRICHMENT_MAX_CONCURRENT_SOCKETS must be greater than or equal to NUTSNEWS_ENRICHMENT_PER_HOST_CONCURRENCY.");
   }
 
   if (!config.shadowMode) {

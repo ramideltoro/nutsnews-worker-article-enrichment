@@ -33,12 +33,15 @@ The handler is value-free at the broker boundary: it never emits full HTML, arti
 
 1. Validate the incoming `enrichmentRequest` payload through the shared runtime processor.
 2. Check DNS/SSRF policy before any article page fetch.
-3. Fetch the canonical URL with configured timeout, redirect, and response-size bounds.
-4. Compute a content fingerprint from safe response metadata and durable body reference.
-5. Reuse an existing stored enrichment result when the fingerprint is unchanged.
-6. Parse metadata through the injected HTML parser interface without carrying full HTML on RabbitMQ.
-7. Normalize image candidates, strip tracking parameters, reject icons/tiny/generic tracker candidates, and rank RSS, Open Graph, Twitter, JSON-LD, srcset, and HTML sources.
-8. Record a bounded metadata reference and publish an `enrichmentResult` payload to approval.
+3. Fetch the canonical URL with configured timeout, redirect, response-size, decompression, socket, and per-host concurrency bounds.
+4. Re-check DNS/SSRF policy for every observed redirect and final URL before parsing.
+5. Reject hostile responses that exceed redirect, body, decompression-ratio, or encoding bounds.
+6. Compute a content fingerprint from safe response metadata and durable body reference.
+7. Reuse an existing stored enrichment result when the fingerprint is unchanged.
+8. Parse metadata through the injected HTML parser interface with parser timeout and DOM-node budgets, without carrying full HTML on RabbitMQ.
+9. Normalize image candidates, strip tracking parameters, reject icons/tiny/generic tracker candidates, and rank RSS, Open Graph, Twitter, JSON-LD, srcset, and HTML sources.
+10. Record a bounded metadata reference and publish an `enrichmentResult` payload to approval.
+11. Return runtime retry for retryable fetch/parser failures so retry exhaustion reaches the enrichment DLQ without duplicate approval publication.
 
 ## Dependency Interfaces
 
@@ -59,6 +62,8 @@ Local doubles back tests and health probes without production dependencies. Back
 
 `NUTSNEWS_ENRICHMENT_CONCURRENCY` caps concurrent enrichment handlers. `NUTSNEWS_ENRICHMENT_PREFETCH` must be greater than or equal to concurrency.
 
-Outbound page fetch bounds are configured with connect/read/total timeouts, response-size limit, and redirect cap. DNS policy and parser dependencies remain injected so production implementations can enforce backend-owned network and storage controls.
+Outbound page fetch bounds are configured with connect/read/total timeouts, response-size/decompressed-size limits, decompression-ratio limit, redirect cap, socket cap, and per-host concurrency cap. Parser bounds include timeout and DOM-node budgets.
+
+Hostile fixtures cover redirect loops, metadata-address redirects, decompression bombs, oversized bodies, invalid encodings, malformed parse output, parser timeouts, and flaky TLS/fetch failures. Runtime replay tests prove duplicate deliveries do not create duplicate stored results or downstream approval publishes.
 
 `NUTSNEWS_ENRICHMENT_SHADOW_MODE` remains required so bootstrap deployment cannot become the production legacy ingestion path by accident.

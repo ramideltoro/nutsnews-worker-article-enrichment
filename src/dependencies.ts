@@ -47,7 +47,12 @@ export interface EnrichmentHttpFetchRequest {
   readonly readTimeoutMs: number;
   readonly totalTimeoutMs: number;
   readonly maxResponseBytes: number;
+  readonly maxDecompressedBytes: number;
+  readonly maxDecompressionRatio: number;
   readonly maxRedirects: number;
+  readonly maxConcurrentSockets: number;
+  readonly perHostConcurrency: number;
+  readonly enforceRedirectDnsPolicy: true;
 }
 
 export interface EnrichmentHttpFetchResponse {
@@ -55,6 +60,12 @@ export interface EnrichmentHttpFetchResponse {
   readonly statusCode: number;
   readonly headers: Readonly<Record<string, string>>;
   readonly bodyBytes: number;
+  readonly compressedBytes?: number;
+  readonly decompressedBytes?: number;
+  readonly encodingValid?: boolean;
+  readonly redirects?: readonly {
+    readonly url: string;
+  }[];
   readonly bodyRef: {
     readonly kind: "backend-record";
     readonly uri: string;
@@ -82,6 +93,8 @@ export interface EnrichmentDnsPolicy {
 export interface EnrichmentHtmlParseInput {
   readonly canonicalArticleId: string;
   readonly finalUrl: string;
+  readonly timeoutMs: number;
+  readonly maxDomNodes: number;
   readonly htmlRef: {
     readonly kind: "backend-record";
     readonly uri: string;
