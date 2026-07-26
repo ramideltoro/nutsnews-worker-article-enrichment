@@ -11,8 +11,14 @@ import {
   createEnrichmentHttpServer,
   type EnrichmentHttpServer
 } from "../src/http.js";
+import {
+  createEnrichmentFailClosedReconciler
+} from "../src/reconciliation.js";
 import { createEnrichmentService } from "../src/service.js";
-import { createLocalEnrichmentDependencies } from "../src/test-doubles.js";
+import {
+  ManualEnrichmentClock,
+  createLocalEnrichmentDependencies
+} from "../src/test-doubles.js";
 
 let activeServer: EnrichmentHttpServer | undefined;
 
@@ -67,6 +73,53 @@ describe("enrichment HTTP endpoints", () => {
     expect(schema.variables.some((variable) => variable.name === "NUTSNEWS_ENRICHMENT_RABBITMQ_URL" && variable.sensitive)).toBe(true);
     expect(JSON.stringify(schema)).not.toContain("amqp://");
     expect(JSON.stringify(schema)).not.toContain("postgres://");
+
+    await service.stop();
+  });
+
+  it("protects the reconciliation endpoint with bearer auth", async () => {
+    const config = loadEnrichmentConfig({
+      NUTSNEWS_ENRICHMENT_HTTP_HOST: "127.0.0.1",
+      NUTSNEWS_ENRICHMENT_HTTP_PORT: "0",
+      NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS: "silent"
+    });
+    const service = createEnrichmentService({
+      config,
+      dependencies: createLocalEnrichmentDependencies()
+    });
+    activeServer = createEnrichmentHttpServer({
+      config,
+      service,
+      reconciler: createEnrichmentFailClosedReconciler(new ManualEnrichmentClock()),
+      reconciliationToken: "test-token"
+    });
+
+    await service.start();
+    await activeServer.listen();
+
+    const unauthorized = await fetch(activeServer.url("/reconcile/outbox"), {
+      method: "POST",
+      body: JSON.stringify({
+        mode: "dry-run"
+      })
+    });
+    expect(unauthorized.status).toBe(401);
+
+    const authorized = await fetch(activeServer.url("/reconcile/outbox"), {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-token"
+      },
+      body: JSON.stringify({
+        mode: "dry-run"
+      })
+    });
+    expect(authorized.status).toBe(409);
+    await expect(authorized.json()).resolves.toMatchObject({
+      status: "failed_closed",
+      writesPerformed: false,
+      productionVisibilityEnabled: false
+    });
 
     await service.stop();
   });
