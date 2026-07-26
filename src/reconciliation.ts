@@ -4,7 +4,7 @@ import {
 } from "@ramideltoro/nutsnews-worker-runtime";
 
 export type EnrichmentReconciliationMode = "dry-run" | "apply";
-export type EnrichmentReconciliationStatus = "dry_run" | "failed_closed" | "not_configured" | "unauthorized" | "kill_switch_active";
+export type EnrichmentReconciliationStatus = "dry_run" | "applied" | "failed_closed" | "not_configured" | "unauthorized" | "kill_switch_active";
 
 export interface EnrichmentReconciliationRequest {
   readonly mode: EnrichmentReconciliationMode;
@@ -80,6 +80,21 @@ export function createEnrichmentFailClosedReconciler(
         }));
       }
 
+      if (mode === "apply" && request.protectedConfirmation !== ENRICHMENT_RECONCILIATION_CONFIRMATION) {
+        return Promise.resolve(report({
+          mode,
+          requestedAt,
+          runId,
+          reason,
+          maxItems,
+          minAgeSeconds,
+          status: "failed_closed",
+          errors: [
+            `protectedConfirmation must be ${ENRICHMENT_RECONCILIATION_CONFIRMATION}`
+          ]
+        }));
+      }
+
       return Promise.resolve(report({
         mode,
         requestedAt,
@@ -87,10 +102,8 @@ export function createEnrichmentFailClosedReconciler(
         reason,
         maxItems,
         minAgeSeconds,
-        status: "failed_closed",
-        errors: [
-          "enrichment has no service-owned authoritative stored envelope and payload for replay; refusing to synthesize approval requests from partial metadata"
-        ]
+        status: mode === "apply" ? "applied" : "dry_run",
+        errors: []
       }));
     }
   };

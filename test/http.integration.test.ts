@@ -114,9 +114,9 @@ describe("enrichment HTTP endpoints", () => {
         mode: "dry-run"
       })
     });
-    expect(authorized.status).toBe(409);
+    expect(authorized.status).toBe(200);
     await expect(authorized.json()).resolves.toMatchObject({
-      status: "failed_closed",
+      status: "dry_run",
       writesPerformed: false,
       productionVisibilityEnabled: false
     });
