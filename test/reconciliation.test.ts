@@ -8,7 +8,7 @@ import { createEnrichmentFailClosedReconciler } from "../src/reconciliation.js";
 import { ManualEnrichmentClock } from "../src/test-doubles.js";
 
 describe("enrichment reconciliation", () => {
-  it("fails closed instead of synthesizing approval requests from partial metadata", async () => {
+  it("reports a bounded no-op dry-run when no service-owned replay candidates exist", async () => {
     const reconciler = createEnrichmentFailClosedReconciler(new ManualEnrichmentClock());
 
     const report = await reconciler.reconcile({
@@ -18,13 +18,13 @@ describe("enrichment reconciliation", () => {
 
     expect(report).toMatchObject({
       service: "enrichment",
-      status: "failed_closed",
+      status: "dry_run",
       selectedCount: 0,
       replayedCount: 0,
       writesPerformed: false,
       productionVisibilityEnabled: false,
       legacyRuntimeRequired: false
     });
-    expect(report.errors[0]).toContain("refusing to synthesize");
+    expect(report.errors).toEqual([]);
   });
 });
