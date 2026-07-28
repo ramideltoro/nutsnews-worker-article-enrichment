@@ -7,11 +7,11 @@ The article enrichment service owns the worker-uplift service boundary that cons
 ## Runtime Surfaces
 
 - Contracts: `@ramideltoro/nutsnews-worker-contracts@0.4.0`
-- Runtime: `@ramideltoro/nutsnews-worker-runtime@0.4.0`
+- Runtime: `@ramideltoro/nutsnews-worker-runtime@0.5.0`
 - Runtime contract override: force runtime's nested contracts dependency to `0.4.0` so payload validation accepts `enrichmentRequest`
 - Input route boundary: `getWorkerRoute("enrichment")`
 - Downstream publish route boundary: `getWorkerRoute("approval")`
-- Health: separate liveness, startup, and readiness probes
+- Health: separate liveness, startup, and readiness probes; readiness requires an active `enrichment` main-queue consumer
 - Metrics: bounded Prometheus text from the shared runtime sink
 - Shutdown: stop accepting deliveries, wait for in-flight handlers, cancel consumers, close broker lifecycle
 

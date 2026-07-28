@@ -3,6 +3,7 @@ import {
 } from "@ramideltoro/nutsnews-worker-contracts";
 import {
   createBrokerLifecycle,
+  createBrokerConsumerReadinessCheck,
   createRuntimeHealthProbeSet,
   createRuntimeInFlightDrainController,
   createRuntimeMessageProcessor,
@@ -114,6 +115,7 @@ export function createEnrichmentService(options: EnrichmentServiceOptions): Enri
         ],
         readinessChecks: [
           brokerReadinessCheck(broker),
+          createBrokerConsumerReadinessCheck(broker, "enrichment"),
           dependencyReadinessCheck("enrichment-state", options.dependencies.stateStore),
           dependencyReadinessCheck("database-transactions", options.dependencies.transactionRunner),
           dependencyReadinessCheck("broker-outbox", options.dependencies.brokerOutbox),
