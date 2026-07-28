@@ -140,7 +140,10 @@ export function createEnrichmentApplication(config = loadEnrichmentConfig()): En
     ? new PayloadRabbitMqTransport({
         url: requiredEnv("NUTSNEWS_ENRICHMENT_RABBITMQ_URL"),
         prefetch: config.prefetch,
-        clock: SYSTEM_RUNTIME_CLOCK
+        clock: SYSTEM_RUNTIME_CLOCK,
+        ...(telemetry === undefined ? {} : {
+          telemetry
+        })
       })
     : undefined;
   const productionDnsPolicy = config.dependencyMode === "production"
