@@ -6,9 +6,9 @@ The article enrichment service owns the worker-uplift service boundary that cons
 
 ## Runtime Surfaces
 
-- Contracts: `@ramideltoro/nutsnews-worker-contracts@0.4.0`
-- Runtime: `@ramideltoro/nutsnews-worker-runtime@0.5.0`
-- Runtime contract override: force runtime's nested contracts dependency to `0.4.0` so payload validation accepts `enrichmentRequest`
+- Contracts: `@ramideltoro/nutsnews-worker-contracts@1.0.0`
+- Runtime: `@ramideltoro/nutsnews-worker-runtime@1.0.0`
+- Runtime package pairing: Runtime `1.0.0` pins Contracts `1.0.0` exactly; no consumer override is permitted
 - Input route boundary: `getWorkerRoute("enrichment")`
 - Downstream publish route boundary: `getWorkerRoute("approval")`
 - Health: bind HTTP diagnostics before broker startup; expose separate liveness, startup, and readiness probes; readiness requires an active `enrichment` main-queue consumer and production durable adapters
@@ -25,8 +25,8 @@ The article enrichment service owns the worker-uplift service boundary that cons
 5. Start the shared broker lifecycle and assert enrichment/approval topology only when durable acknowledgement adapters are eligible.
 6. Register an `enrichment` consumer through the shared runtime message processor.
 7. Validate incoming envelopes and enrichment-stage payloads before delegated work.
-8. Claim the durable idempotency interface before delegating to the injected handler.
-9. Convert Runtime 0.5 claim, completion, and failure-record store exceptions into explicitly classified retry/DLQ dispositions instead of allowing a delivery to escape without a broker action.
+8. Claim the durable idempotency interface, then reject any independently valid payload whose idempotency key does not equal its envelope key before business side effects.
+9. Preserve Runtime `1.0.0` token-aware claim ownership across compare-and-set completion, failure, and conditional release; ambiguous claim failures retain their lease, stale tokens cannot change another delivery's claim, and committed completion is never downgraded.
 10. Expose the bounded `success`, `duplicate`, `invalid`, `retry`, `dlq`, and `failure` outcome set from the first scrape, emit exactly one classified terminal lifecycle event for every started delivery, and derive canonical counters and fixed-bucket latency from those events.
 11. Expose durable transaction and broker outbox tools to the handler.
 12. Bound HTTP client, DNS policy, HTML parser, state, transaction, and outbox readiness probes while keeping liveness and startup independent.
@@ -63,6 +63,8 @@ The repository defines narrow interfaces for:
 - enrichment work handler.
 
 Local doubles back tests and health probes without production dependencies. Their adapter mode is `local`, so production dependency mode cannot connect the broker or register a consumer with ephemeral acknowledgement state. The current production durable adapter factory deliberately returns unhealthy, operation-rejecting `unavailable` implementations for state, transactions, and outbox; backend-owned work must supply real `production` implementations before the shadow consumer can run.
+
+Any future production state adapter must return a fresh opaque token from an atomic claim, compare that token for completion/failure/release, preserve completed records, atomically reclaim expired claims, and cap its claim lease at five minutes. The service-local conformance suite models ambiguous claim and completion responses, stale ownership, completed-record preservation, and lease expiry/reclaim. It does not admit a future PostgreSQL adapter: that implementation must pass the same cases against its real transaction boundary and prove that the whole operation finishes below the lease or renews ownership safely.
 
 `NUTSNEWS_ENVIRONMENT=production` also requires `NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE=production`; a missing or mistyped dependency mode cannot activate local in-memory acknowledgement state under a production environment label.
 

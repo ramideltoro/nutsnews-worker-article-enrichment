@@ -112,6 +112,7 @@ export {
   type EnrichmentReconciler
 } from "./reconciliation.js";
 export {
+  ENRICHMENT_IDEMPOTENCY_CLAIM_LEASE_MS,
   InMemoryEnrichmentStateStore,
   LocalBrokerTransport,
   LocalEnrichmentBrokerOutbox,
@@ -387,20 +388,26 @@ function combineTelemetrySinks(
   };
 }
 
-export const SUPPORTED_RUNTIME_PACKAGE_VERSION = "0.5.0";
+export const SUPPORTED_CONTRACTS_PACKAGE_VERSION = "1.0.0";
+export const SUPPORTED_RUNTIME_PACKAGE_VERSION = "1.0.0";
 
 function assertPackageCompatibility(): void {
   const contracts = getContractPackageMetadata();
   const runtime = getRuntimePackageMetadata();
   const contractsVersion: string = contracts.packageVersion;
   const runtimeVersion: string = runtime.packageVersion;
+  const runtimeContractsVersion: string = runtime.contractsPackageVersion;
 
-  if (contractsVersion !== "0.4.0") {
+  if (contractsVersion !== SUPPORTED_CONTRACTS_PACKAGE_VERSION) {
     throw new Error(`Unsupported contracts package version ${contractsVersion}.`);
   }
 
   if (runtimeVersion !== SUPPORTED_RUNTIME_PACKAGE_VERSION) {
     throw new Error(`Unsupported runtime package version ${runtimeVersion}.`);
+  }
+
+  if (runtimeContractsVersion !== SUPPORTED_CONTRACTS_PACKAGE_VERSION) {
+    throw new Error(`Unsupported runtime contracts package version ${runtimeContractsVersion}.`);
   }
 }
 

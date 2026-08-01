@@ -9,7 +9,6 @@ import {
   type WorkerStage
 } from "@ramideltoro/nutsnews-worker-contracts";
 import {
-  createInMemoryIdempotencyStore,
   type BrokerConsumerHandle,
   type BrokerDeliveryHandler,
   type BrokerPublishCommand,
@@ -18,6 +17,7 @@ import {
   type RuntimeClock,
   type RuntimeHandlerResult,
   type RuntimeIdempotencyClaimContext,
+  type RuntimeIdempotencyClaimReleaseResult,
   type RuntimeIdempotencyClaimResult,
   type RuntimeIdempotencyCompletion,
   type RuntimeIdempotencyFailure,
@@ -62,15 +62,37 @@ export class ManualEnrichmentClock implements RuntimeClock {
   }
 }
 
+export const ENRICHMENT_IDEMPOTENCY_CLAIM_LEASE_MS = 300_000;
+
+interface InMemoryEnrichmentIdempotencyEntry {
+  readonly status: "in-progress" | "completed" | "failed";
+  readonly firstSeenAt: string;
+  readonly claimToken?: string;
+  readonly claimedAtMs?: number;
+  readonly completion?: RuntimeIdempotencyCompletion;
+  readonly failure?: RuntimeIdempotencyFailure;
+}
+
 export class InMemoryEnrichmentStateStore implements EnrichmentStateStore {
   readonly name: string = "local-enrichment-state";
   readonly adapterMode = "local" as const;
   status: EnrichmentDependencyProbe["status"] = "ok";
   readonly results: EnrichmentStoredResult[] = [];
-  private readonly store;
+  readonly claimLeaseMs: number;
+  private readonly clock: RuntimeClock;
+  private readonly idempotencyEntries = new Map<string, InMemoryEnrichmentIdempotencyEntry>();
+  private claimSequence = 0;
 
-  constructor(clock: RuntimeClock = new ManualEnrichmentClock()) {
-    this.store = createInMemoryIdempotencyStore(clock);
+  constructor(
+    clock: RuntimeClock = new ManualEnrichmentClock(),
+    claimLeaseMs = ENRICHMENT_IDEMPOTENCY_CLAIM_LEASE_MS
+  ) {
+    if (!Number.isSafeInteger(claimLeaseMs) || claimLeaseMs < 1 || claimLeaseMs > ENRICHMENT_IDEMPOTENCY_CLAIM_LEASE_MS) {
+      throw new RangeError(`Enrichment idempotency claim lease must be between 1 and ${String(ENRICHMENT_IDEMPOTENCY_CLAIM_LEASE_MS)} milliseconds.`);
+    }
+
+    this.clock = clock;
+    this.claimLeaseMs = claimLeaseMs;
   }
 
   probe(): EnrichmentDependencyProbe {
@@ -81,15 +103,109 @@ export class InMemoryEnrichmentStateStore implements EnrichmentStateStore {
   }
 
   claim(idempotencyKey: string, context: RuntimeIdempotencyClaimContext): Promise<RuntimeIdempotencyClaimResult> {
-    return this.store.claim(idempotencyKey, context);
+    const existing = this.idempotencyEntries.get(idempotencyKey);
+
+    if (existing?.status === "completed") {
+      const completedAt = existing.completion?.completedAt ?? existing.firstSeenAt;
+
+      return Promise.resolve(existing.completion === undefined
+        ? {
+            status: "already-completed",
+            firstSeenAt: existing.firstSeenAt,
+            completedAt
+          }
+        : {
+            status: "already-completed",
+            firstSeenAt: existing.firstSeenAt,
+            completedAt,
+            completion: existing.completion
+          });
+    }
+
+    if (existing?.status === "in-progress" && !this.claimExpired(existing)) {
+      return Promise.resolve({
+        status: "in-progress",
+        firstSeenAt: existing.firstSeenAt
+      });
+    }
+
+    const firstSeenAt = existing?.firstSeenAt ?? context.receivedAt;
+    const claimToken = this.nextClaimToken();
+
+    this.idempotencyEntries.set(idempotencyKey, {
+      status: "in-progress",
+      firstSeenAt,
+      claimToken,
+      claimedAtMs: this.clock.now().getTime()
+    });
+
+    return Promise.resolve({
+      status: "claimed",
+      firstSeenAt,
+      replay: existing !== undefined,
+      claimToken
+    });
   }
 
   markCompleted(idempotencyKey: string, completion: RuntimeIdempotencyCompletion): Promise<void> {
-    return this.store.markCompleted(idempotencyKey, completion);
+    const existing = this.idempotencyEntries.get(idempotencyKey);
+
+    if (existing?.status !== "in-progress" || existing.claimToken !== completion.claimToken || this.claimExpired(existing)) {
+      return Promise.reject(new Error("Cannot complete an enrichment idempotency claim owned by another delivery."));
+    }
+
+    this.idempotencyEntries.set(idempotencyKey, {
+      status: "completed",
+      firstSeenAt: existing.firstSeenAt,
+      completion
+    });
+
+    return Promise.resolve();
   }
 
   markFailed(idempotencyKey: string, failure: RuntimeIdempotencyFailure): Promise<void> {
-    return this.store.markFailed(idempotencyKey, failure);
+    const existing = this.idempotencyEntries.get(idempotencyKey);
+
+    if (existing?.status !== "in-progress" || existing.claimToken !== failure.claimToken || this.claimExpired(existing)) {
+      return Promise.reject(new Error("Cannot fail an enrichment idempotency claim owned by another delivery."));
+    }
+
+    this.idempotencyEntries.set(idempotencyKey, {
+      status: "failed",
+      firstSeenAt: existing.firstSeenAt,
+      failure
+    });
+
+    return Promise.resolve();
+  }
+
+  releaseClaim(
+    idempotencyKey: string,
+    failure: RuntimeIdempotencyFailure
+  ): Promise<RuntimeIdempotencyClaimReleaseResult> {
+    const existing = this.idempotencyEntries.get(idempotencyKey);
+
+    if (existing?.status === "completed") {
+      return Promise.resolve({
+        status: "preserved-completed"
+      });
+    }
+
+    if (existing?.status !== "in-progress" || existing.claimToken !== failure.claimToken || this.claimExpired(existing)) {
+      return Promise.resolve({
+        status: "not-owned"
+      });
+    }
+
+    this.idempotencyEntries.set(idempotencyKey, {
+      status: "failed",
+      firstSeenAt: existing.firstSeenAt,
+      failure
+    });
+
+    return Promise.resolve({
+      status: "released"
+    });
   }
 
   findResultByFingerprint(
@@ -108,6 +224,17 @@ export class InMemoryEnrichmentStateStore implements EnrichmentStateStore {
     this.results.push(result);
 
     return Promise.resolve(result);
+  }
+
+  private claimExpired(entry: InMemoryEnrichmentIdempotencyEntry): boolean {
+    return entry.claimedAtMs !== undefined
+      && this.clock.now().getTime() - entry.claimedAtMs >= this.claimLeaseMs;
+  }
+
+  private nextClaimToken(): string {
+    this.claimSequence += 1;
+
+    return `enrichment-claim:${String(this.clock.now().getTime())}:${String(this.claimSequence)}`;
   }
 }
 

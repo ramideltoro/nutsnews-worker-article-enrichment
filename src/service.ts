@@ -486,45 +486,27 @@ function classifyStateStoreFailures(
   store: RuntimeIdempotencyStore,
   onFailure: () => Promise<void>
 ): RuntimeIdempotencyStore {
-  const pendingCompletionFailures = new Map<string, EnrichmentProcessorDispositionError>();
-
   return {
     claim: async (idempotencyKey, context) => stateStoreOperation(
       "idempotency-claim-error",
       () => store.claim(idempotencyKey, context),
       onFailure
     ),
-    markCompleted: async (idempotencyKey, completion) => {
-      try {
-        await stateStoreOperation(
-          "idempotency-completion-error",
-          () => store.markCompleted(idempotencyKey, completion),
-          onFailure
-        );
-      } catch (error: unknown) {
-        if (error instanceof EnrichmentProcessorDispositionError) {
-          pendingCompletionFailures.set(idempotencyKey, error);
-        }
-        throw error;
-      }
-    },
-    markFailed: async (idempotencyKey, failure) => {
-      const completionFailure = pendingCompletionFailures.get(idempotencyKey);
-
-      try {
-        await stateStoreOperation(
-          "idempotency-failure-record-error",
-          () => store.markFailed(idempotencyKey, failure),
-          onFailure
-        );
-      } finally {
-        pendingCompletionFailures.delete(idempotencyKey);
-      }
-
-      if (completionFailure !== undefined) {
-        throw completionFailure;
-      }
-    }
+    markCompleted: async (idempotencyKey, completion) => stateStoreOperation(
+      "idempotency-completion-error",
+      () => store.markCompleted(idempotencyKey, completion),
+      onFailure
+    ),
+    markFailed: async (idempotencyKey, failure) => stateStoreOperation(
+      "idempotency-failure-record-error",
+      () => store.markFailed(idempotencyKey, failure),
+      onFailure
+    ),
+    releaseClaim: async (idempotencyKey, failure) => stateStoreOperation(
+      "idempotency-completion-error",
+      () => store.releaseClaim(idempotencyKey, failure),
+      onFailure
+    )
   };
 }
 
@@ -577,7 +559,7 @@ async function completeProcessorFailure(
       stage: "enrichment",
       queue,
       durationMs,
-      outcome: "failure",
+      outcome: "invalid",
       attributes: {
         issueCode: issues[0]?.code ?? "invalid-envelope",
         issuePath: issues[0]?.path ?? "$"
@@ -607,7 +589,7 @@ async function completeProcessorFailure(
       at: runtimeNow(clock),
       stage: "enrichment",
       ...envelopeTelemetryFields(envelope, queue, durationMs),
-      outcome: "failure",
+      outcome: "invalid",
       attributes: {
         issueCode: "stage-mismatch",
         issuePath: "$.route"

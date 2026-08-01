@@ -28,12 +28,12 @@ The image runs as a non-root user, exposes port `8080`, and serves:
 
 The service consumes exact immutable worker-uplift package versions:
 
-- `@ramideltoro/nutsnews-worker-contracts@0.4.0`
-- `@ramideltoro/nutsnews-worker-runtime@0.5.0`
+- `@ramideltoro/nutsnews-worker-contracts@1.0.0`
+- `@ramideltoro/nutsnews-worker-runtime@1.0.0`
 
 Local and CI installs use the owner-scoped GitHub Packages npm registry. No package token value is committed.
 
-This repository overrides the runtime package's nested contracts dependency to `0.4.0` so runtime payload validation recognizes `enrichmentRequest` until a later runtime release depends on that contract version directly.
+Runtime `1.0.0` pins Contracts `1.0.0` directly, so no nested dependency override is required. Startup verifies the installed package pair and refuses any version drift.
 
 `/ready` is unhealthy whenever the `enrichment` main queue has zero active consumers. Every dependency readiness probe is bounded by `NUTSNEWS_ENRICHMENT_STARTUP_TIMEOUT_MS`. Consumer cancellation and channel-drop recovery emit bounded structured runtime events and Prometheus consumer-state metrics. The HTTP diagnostics listener binds before broker startup, and broker startup is bounded by the same deadline, so `/live`, `/startup`, `/ready`, and `/metrics` expose fail-closed state while startup is pending. Failed-startup cleanup closes diagnostics independently even if broker cleanup stalls.
 
@@ -49,7 +49,7 @@ Production mode does not fall back to the local in-memory acknowledgement path, 
 
 Only bounded operational dimensions are metric labels. Message, article, feed, idempotency, correlation, and trace identifiers remain structured log fields and are never Prometheus labels.
 
-The liveness/startup/readiness gauges are present on the first scrape: liveness starts healthy while startup and readiness start fail-closed, startup follows the service lifecycle, and readiness changes only from an evaluated readiness result or a known consumer shutdown. Runtime 0.5 claim, completion, and failure-record store exceptions are converted into explicitly classified retry or DLQ dispositions; each started delivery still emits exactly one terminal lifecycle outcome and is never discarded by an uncaught store exception. Telemetry, log, metric, and telemetry-flush failures are best effort and cannot change message acknowledgement, idempotency, retry, or DLQ behavior. Duration-less dependency events remain available in structured logs but are not forwarded into legacy duration summaries, and startup does not emit a fabricated zero-millisecond dependency observation.
+The liveness/startup/readiness gauges are present on the first scrape: liveness starts healthy while startup and readiness start fail-closed, startup follows the service lifecycle, and readiness changes only from an evaluated readiness result or a known consumer shutdown. Runtime `1.0.0` uses opaque claim tokens for compare-and-set completion, failure, and conditional release; ambiguous claim failures are never released, stale owners cannot alter a newer claim, and a completion that committed before its response failed remains acknowledged. Production adapters must atomically reclaim expired claims with a lease no longer than five minutes; this repository's unavailable production adapter remains fail-closed until a backend-owned implementation satisfies that contract. Each started delivery still emits exactly one terminal lifecycle outcome. Telemetry, log, metric, and telemetry-flush failures are best effort and cannot change message acknowledgement, idempotency, retry, or DLQ behavior. Duration-less dependency events remain available in structured logs but are not forwarded into duration histograms, and startup does not emit a fabricated zero-millisecond dependency observation.
 
 ## Configuration
 

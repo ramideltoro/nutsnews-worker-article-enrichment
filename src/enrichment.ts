@@ -91,6 +91,15 @@ async function handleArticleEnrichment(
   tools: EnrichmentWorkTools,
   options: ArticleEnrichmentWorkHandlerOptions
 ) {
+  const payloadIdempotencyKey = stringValue(context.payload.idempotencyKey, "idempotencyKey");
+
+  if (payloadIdempotencyKey !== context.envelope.idempotencyKey) {
+    return {
+      status: "terminal-failure",
+      reason: "idempotency-key-mismatch"
+    } as const;
+  }
+
   const request = enrichmentRequestFromContext(context);
   const processed = await processRequest(request, tools, options);
 
@@ -644,7 +653,7 @@ function approvalPublishCommand(
         firstAttemptAt: result.recordedAt
       },
       producer: {
-        name: config.serviceName,
+        name: route.producer,
         version: config.serviceVersion
       },
       payloadRef: {

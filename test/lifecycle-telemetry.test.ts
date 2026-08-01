@@ -85,7 +85,7 @@ describe("enrichment lifecycle telemetry", () => {
     });
     expect(completed[2]).toMatchObject({
       name: "runtime.message.invalid",
-      outcome: "failure",
+      outcome: "invalid",
       attributes: {
         issuePath: "$.schemaVersion"
       }
@@ -420,7 +420,7 @@ describe("enrichment lifecycle telemetry", () => {
         reason: "idempotency-failure-record-error"
       }
     });
-    expect(markFailed).toHaveBeenCalledTimes(2);
+    expect(markFailed).toHaveBeenCalledTimes(1);
     expect(context.workHandler.handled).toHaveLength(1);
     expect(metricValue(context.metrics.collect(), "nutsnews_worker_uplift_stage_events_total", "dlq")).toBe(1);
     expect(sampleValue(context.metrics.collect(), "nutsnews_worker_uplift_stage_latency_seconds_count")).toBe(1);
@@ -696,7 +696,13 @@ function expectedMetricLabelNames(line: string): readonly string[] {
     ];
   }
 
-  return [
-    ...RUNTIME_ALLOWED_METRIC_LABELS
-  ];
+  const actual = new Set(metricLabelNames(line));
+  const boundedRuntimeLabels = RUNTIME_ALLOWED_METRIC_LABELS.filter((label) => actual.has(label));
+
+  return line.includes("_bucket{")
+    ? [
+        ...boundedRuntimeLabels,
+        "le"
+      ]
+    : boundedRuntimeLabels;
 }

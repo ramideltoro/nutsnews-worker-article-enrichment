@@ -1,4 +1,5 @@
 import type {
+  RuntimeIdempotencyClaimReleaseResult,
   RuntimeIdempotencyClaimResult
 } from "@ramideltoro/nutsnews-worker-runtime";
 
@@ -41,6 +42,10 @@ export class UnsupportedProductionEnrichmentStateStore implements EnrichmentStat
 
   markFailed(): Promise<void> {
     return unavailable("state-store", "markFailed");
+  }
+
+  releaseClaim(): Promise<RuntimeIdempotencyClaimReleaseResult> {
+    return unavailable("state-store", "releaseClaim");
   }
 
   findResultByFingerprint(): Promise<EnrichmentStoredResult | undefined> {
