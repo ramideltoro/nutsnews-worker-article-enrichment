@@ -16,6 +16,7 @@ export interface EnrichmentConfigVariable {
 
 export const ENRICHMENT_CONFIG_SCHEMA = [
   variable("NUTSNEWS_ENVIRONMENT", "Runtime environment label for logs and metrics.", false, false, "local"),
+  variable("NUTSNEWS_ENRICHMENT_BUILD_REVISION", "Immutable lowercase 40-character Git commit revision baked into the production image.", true, false, "development"),
   variable("NUTSNEWS_ENRICHMENT_HTTP_HOST", "Health and metrics bind host.", false, false, "0.0.0.0"),
   variable("NUTSNEWS_ENRICHMENT_HTTP_PORT", "Health and metrics bind port.", false, false, "8080"),
   variable("NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE", "Use test dependencies locally or require production dependency presence.", false, false, "test"),
@@ -34,6 +35,7 @@ export const ENRICHMENT_CONFIG_SCHEMA = [
   variable("NUTSNEWS_ENRICHMENT_PER_HOST_CONCURRENCY", "Maximum concurrent outbound fetches per host.", false, false, "4"),
   variable("NUTSNEWS_ENRICHMENT_PARSER_TIMEOUT_MS", "Maximum parser runtime per article page.", false, false, "5000"),
   variable("NUTSNEWS_ENRICHMENT_MAX_DOM_NODES", "Maximum DOM node budget for article-page parsing.", false, false, "50000"),
+  variable("NUTSNEWS_ENRICHMENT_STARTUP_TIMEOUT_MS", "Maximum broker and consumer startup time before the process fails closed.", false, false, "30000"),
   variable("NUTSNEWS_ENRICHMENT_SHUTDOWN_TIMEOUT_MS", "Graceful shutdown drain timeout in milliseconds.", false, false, "30000"),
   variable("NUTSNEWS_ENRICHMENT_SHADOW_MODE", "Keep enrichment output isolated from legacy ingestion.", false, false, "true"),
   variable("NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS", "Structured runtime log sink mode.", false, false, "stdout"),
@@ -44,6 +46,7 @@ export interface EnrichmentConfig {
   readonly serviceName: typeof ENRICHMENT_SERVICE_NAME;
   readonly serviceVersion: typeof ENRICHMENT_SERVICE_VERSION;
   readonly environment: string;
+  readonly buildRevision: string;
   readonly host: string;
   readonly http: {
     readonly host: string;
@@ -71,6 +74,7 @@ export interface EnrichmentConfig {
     readonly timeoutMs: number;
     readonly maxDomNodes: number;
   };
+  readonly startupTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
   readonly shadowMode: boolean;
   readonly telemetryLogs: EnrichmentTelemetryLogMode;
@@ -89,6 +93,7 @@ export class EnrichmentConfigError extends Error {
 
 export function loadEnrichmentConfig(env: NodeJS.ProcessEnv = process.env): EnrichmentConfig {
   const issues: string[] = [];
+  const environment = nonEmpty(env.NUTSNEWS_ENVIRONMENT, "local");
   const dependencyMode = parseDependencyMode(env.NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE, issues);
   const dependencies = {
     databaseConfigured: hasValue(env.NUTSNEWS_ENRICHMENT_DATABASE_URL),
@@ -98,6 +103,12 @@ export function loadEnrichmentConfig(env: NodeJS.ProcessEnv = process.env): Enri
   if (dependencyMode === "production") {
     requireConfigured("NUTSNEWS_ENRICHMENT_DATABASE_URL", dependencies.databaseConfigured, issues);
     requireConfigured("NUTSNEWS_ENRICHMENT_RABBITMQ_URL", dependencies.rabbitmqConfigured, issues);
+  }
+
+  const buildRevision = parseBuildRevision(env.NUTSNEWS_ENRICHMENT_BUILD_REVISION, dependencyMode, issues);
+
+  if (environment.trim().toLowerCase() === "production" && dependencyMode !== "production") {
+    issues.push("NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE must be production when NUTSNEWS_ENVIRONMENT=production.");
   }
 
   const concurrency = parseInteger(env.NUTSNEWS_ENRICHMENT_CONCURRENCY, "NUTSNEWS_ENRICHMENT_CONCURRENCY", 6, 1, 64, issues);
@@ -120,7 +131,8 @@ export function loadEnrichmentConfig(env: NodeJS.ProcessEnv = process.env): Enri
   const config: EnrichmentConfig = {
     serviceName: ENRICHMENT_SERVICE_NAME,
     serviceVersion: ENRICHMENT_SERVICE_VERSION,
-    environment: nonEmpty(env.NUTSNEWS_ENVIRONMENT, "local"),
+    environment,
+    buildRevision,
     host: nonEmpty(env.HOSTNAME, os.hostname()),
     http: {
       host: nonEmpty(env.NUTSNEWS_ENRICHMENT_HTTP_HOST, "0.0.0.0"),
@@ -132,6 +144,7 @@ export function loadEnrichmentConfig(env: NodeJS.ProcessEnv = process.env): Enri
     prefetch,
     fetch,
     parser,
+    startupTimeoutMs: parseInteger(env.NUTSNEWS_ENRICHMENT_STARTUP_TIMEOUT_MS, "NUTSNEWS_ENRICHMENT_STARTUP_TIMEOUT_MS", 30_000, 100, 120_000, issues),
     shutdownTimeoutMs: parseInteger(env.NUTSNEWS_ENRICHMENT_SHUTDOWN_TIMEOUT_MS, "NUTSNEWS_ENRICHMENT_SHUTDOWN_TIMEOUT_MS", 30_000, 1_000, 600_000, issues),
     shadowMode: parseBoolean(env.NUTSNEWS_ENRICHMENT_SHADOW_MODE, "NUTSNEWS_ENRICHMENT_SHADOW_MODE", true, issues),
     telemetryLogs: parseTelemetryLogMode(env.NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS, issues),
@@ -206,6 +219,20 @@ function parseDependencyMode(value: string | undefined, issues: string[]): Enric
 
   issues.push("NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE must be test or production.");
   return "test";
+}
+
+function parseBuildRevision(
+  value: string | undefined,
+  dependencyMode: EnrichmentDependencyMode,
+  issues: string[]
+): string {
+  const revision = nonEmpty(value, "development");
+
+  if (dependencyMode === "production" && !/^[0-9a-f]{40}$/u.test(revision)) {
+    issues.push("NUTSNEWS_ENRICHMENT_BUILD_REVISION must be a lowercase 40-character Git commit SHA when NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE=production.");
+  }
+
+  return revision;
 }
 
 function parseTelemetryLogMode(value: string | undefined, issues: string[]): EnrichmentTelemetryLogMode {

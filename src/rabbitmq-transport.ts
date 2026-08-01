@@ -32,6 +32,7 @@ import {
 } from "amqplib";
 
 const DEFAULT_CONFIRM_TIMEOUT_MS = WORKER_DELIVERY_BEHAVIOR.confirmTimeoutMs;
+const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 const DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
 
 interface PayloadCarrier {
@@ -70,12 +71,17 @@ export class PayloadRabbitMqTransport implements RuntimeBrokerTransport {
     readonly clock: RuntimeClock;
     readonly telemetry?: RuntimeTelemetrySink;
     readonly connect?: RabbitMqConnect;
+    readonly connectTimeoutMs?: number;
   }) {
     this.url = options.url;
     this.prefetchCount = options.prefetch;
     this.clock = options.clock;
     this.telemetry = options.telemetry;
-    this.connectToBroker = options.connect ?? amqpConnect;
+    const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+
+    this.connectToBroker = options.connect ?? ((url) => amqpConnect(url, {
+      timeout: connectTimeoutMs
+    }));
   }
 
   get inFlightDeliveryCount(): number {
@@ -205,13 +211,39 @@ export class PayloadRabbitMqTransport implements RuntimeBrokerTransport {
       return this.channel;
     }
 
-    if (this.closing) {
+    if (this.isClosing()) {
       throw new Error("RabbitMQ payload transport is closing.");
     }
 
     const connection = await this.connectToBroker(this.url);
-    const channel = await connection.createConfirmChannel();
+
+    if (this.isClosing()) {
+      await connection.close().catch(() => undefined);
+      throw new Error("RabbitMQ payload transport closed during connection startup.");
+    }
+
     this.connection = connection;
+    let channel: ConfirmChannel;
+
+    try {
+      channel = await connection.createConfirmChannel();
+    } catch (error: unknown) {
+      if (this.connection === connection) {
+        this.connection = undefined;
+      }
+      await connection.close().catch(() => undefined);
+      throw error;
+    }
+
+    if (this.isClosing()) {
+      await channel.close().catch(() => undefined);
+      await connection.close().catch(() => undefined);
+      if (this.connection === connection) {
+        this.connection = undefined;
+      }
+      throw new Error("RabbitMQ payload transport closed during channel startup.");
+    }
+
     this.channel = channel;
 
     connection.on("close", () => {
@@ -242,6 +274,10 @@ export class PayloadRabbitMqTransport implements RuntimeBrokerTransport {
     await this.restoreConsumers(channel);
 
     return channel;
+  }
+
+  private isClosing(): boolean {
+    return this.closing;
   }
 
   private async restoreConsumers(channel: ConfirmChannel): Promise<void> {

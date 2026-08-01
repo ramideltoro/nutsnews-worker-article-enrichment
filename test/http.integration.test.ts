@@ -1,4 +1,3 @@
-import { createPrometheusRuntimeTelemetrySink } from "@ramideltoro/nutsnews-worker-runtime";
 import {
   afterEach,
   describe,
@@ -11,6 +10,7 @@ import {
   createEnrichmentHttpServer,
   type EnrichmentHttpServer
 } from "../src/http.js";
+import { createEnrichmentPrometheusTelemetrySink } from "../src/metrics.js";
 import {
   createEnrichmentFailClosedReconciler
 } from "../src/reconciliation.js";
@@ -36,7 +36,7 @@ describe("enrichment HTTP endpoints", () => {
       NUTSNEWS_ENRICHMENT_HTTP_PORT: "0",
       NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS: "silent"
     });
-    const metrics = createPrometheusRuntimeTelemetrySink({
+    const metrics = createEnrichmentPrometheusTelemetrySink({
       identity: {
         service: config.serviceName,
         version: config.serviceVersion,
@@ -47,6 +47,7 @@ describe("enrichment HTTP endpoints", () => {
     const service = createEnrichmentService({
       config,
       dependencies: createLocalEnrichmentDependencies(),
+      telemetry: metrics,
       metrics
     });
     activeServer = createEnrichmentHttpServer({
@@ -64,7 +65,13 @@ describe("enrichment HTTP endpoints", () => {
 
     const metricsResponse = await fetch(activeServer.url("/metrics"));
     expect(metricsResponse.status).toBe(200);
-    expect(await metricsResponse.text()).toContain("nutsnews_worker_dependency_duration_ms");
+    const metricsBody = await metricsResponse.text();
+    expect(metricsBody).not.toContain("nutsnews_worker_dependency_duration_ms");
+    expect(metricsBody).toContain('nutsnews_worker_expected_active{environment="local",service="nutsnews-worker-article-enrichment"} 0');
+    expect(metricsBody).toContain('queue="nutsnews.worker.enrichment.v1",outcome="active"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="enrichment",probe="liveness",outcome="ok"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="enrichment",probe="startup",outcome="ok"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="enrichment",probe="readiness",outcome="ok"} 1');
 
     const schemaResponse = await fetch(activeServer.url("/config-schema"));
     expect(schemaResponse.status).toBe(200);

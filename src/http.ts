@@ -2,10 +2,7 @@ import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
-import {
-  runtimeHealthEndpointResponse,
-  type PrometheusRuntimeTelemetrySink
-} from "@ramideltoro/nutsnews-worker-runtime";
+import { runtimeHealthEndpointResponse } from "@ramideltoro/nutsnews-worker-runtime";
 
 import {
   ENRICHMENT_CONFIG_SCHEMA,
@@ -16,12 +13,13 @@ import {
   type EnrichmentReconciliationRequest,
   type EnrichmentReconciler
 } from "./reconciliation.js";
+import type { EnrichmentMetricsSink } from "./metrics.js";
 import type { EnrichmentService } from "./service.js";
 
 export interface EnrichmentHttpServerOptions {
   readonly config: EnrichmentConfig;
   readonly service: EnrichmentService;
-  readonly metrics?: PrometheusRuntimeTelemetrySink;
+  readonly metrics?: EnrichmentMetricsSink;
   readonly reconciler?: EnrichmentReconciler;
   readonly reconciliationToken?: string;
 }

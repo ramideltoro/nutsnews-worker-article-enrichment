@@ -3,7 +3,6 @@ import { pathToFileURL } from "node:url";
 import { getContractPackageMetadata } from "@ramideltoro/nutsnews-worker-contracts";
 import {
   createJsonRuntimeTelemetrySink,
-  createPrometheusRuntimeTelemetrySink,
   createRuntimeShutdownController,
   getRuntimePackageMetadata,
   SYSTEM_RUNTIME_CLOCK,
@@ -15,13 +14,16 @@ import {
   type EnrichmentConfig
 } from "./config.js";
 import { createArticleEnrichmentWorkHandler } from "./enrichment.js";
+import type { EnrichmentDependencies } from "./dependencies.js";
 import { createEnrichmentHttpServer } from "./http.js";
+import { createEnrichmentPrometheusTelemetrySink } from "./metrics.js";
 import {
   DefaultEnrichmentDnsPolicy,
   InMemoryEnrichmentBodyStore,
   NodeEnrichmentHttpClient,
   SimpleEnrichmentHtmlParser
 } from "./production.js";
+import { createUnavailableProductionEnrichmentDurableAdapters } from "./production-adapters.js";
 import { PayloadRabbitMqTransport } from "./rabbitmq-transport.js";
 import {
   createEnrichmentFailClosedReconciler
@@ -42,6 +44,8 @@ export type {
   EnrichmentDatabaseTransaction,
   EnrichmentDatabaseTransactionRunner,
   EnrichmentDependencies,
+  EnrichmentDependencyAdapterMode,
+  EnrichmentDependencyAdapterModes,
   EnrichmentDependencyProbe,
   EnrichmentDnsPolicy,
   EnrichmentDnsPolicyDecision,
@@ -70,6 +74,15 @@ export {
   stableUuid
 } from "./ids.js";
 export {
+  ENRICHMENT_STAGE_LATENCY_BUCKETS_SECONDS,
+  createEnrichmentPrometheusTelemetrySink,
+  type EnrichmentHealthOutcome,
+  type EnrichmentHealthProbe,
+  type EnrichmentMetricsSink,
+  type EnrichmentPrometheusTelemetrySink,
+  type EnrichmentStageOutcome
+} from "./metrics.js";
+export {
   createEnrichmentService,
   type EnrichmentService
 } from "./service.js";
@@ -80,6 +93,13 @@ export {
   NodeEnrichmentHttpClient,
   SimpleEnrichmentHtmlParser
 } from "./production.js";
+export {
+  EnrichmentProductionAdapterUnavailableError,
+  UnsupportedProductionEnrichmentBrokerOutbox,
+  UnsupportedProductionEnrichmentStateStore,
+  UnsupportedProductionEnrichmentTransactionRunner,
+  createUnavailableProductionEnrichmentDurableAdapters
+} from "./production-adapters.js";
 export {
   PayloadRabbitMqTransport
 } from "./rabbitmq-transport.js";
@@ -92,6 +112,7 @@ export {
   type EnrichmentReconciler
 } from "./reconciliation.js";
 export {
+  ENRICHMENT_IDEMPOTENCY_CLAIM_LEASE_MS,
   InMemoryEnrichmentStateStore,
   LocalBrokerTransport,
   LocalEnrichmentBrokerOutbox,
@@ -109,17 +130,40 @@ export {
 
 export interface EnrichmentApplication {
   readonly config: EnrichmentConfig;
+  diagnosticsUrl(path?: string): string;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
 
-export function createEnrichmentApplication(config = loadEnrichmentConfig()): EnrichmentApplication {
+export interface EnrichmentApplicationOptions {
+  readonly dependencies?: EnrichmentDependencies;
+}
+
+export class EnrichmentStartupTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    super(`Enrichment service startup exceeded ${String(timeoutMs)} milliseconds.`);
+    this.name = "EnrichmentStartupTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export function createEnrichmentApplication(
+  config = loadEnrichmentConfig(),
+  options: EnrichmentApplicationOptions = {}
+): EnrichmentApplication {
   const identity = {
     service: config.serviceName,
     version: config.serviceVersion,
     environment: config.environment,
-    host: config.host
-  };
+    host: config.host,
+    revision: config.buildRevision,
+    deployment: config.dependencyMode === "production"
+      ? "shadow"
+      : config.environment === "test" ? "test" : "local",
+    adapter: config.dependencyMode === "production" ? "mixed" : "in_memory"
+  } as const;
   const logSink = config.telemetryLogs === "stdout"
     ? createJsonRuntimeTelemetrySink({
         identity,
@@ -129,50 +173,13 @@ export function createEnrichmentApplication(config = loadEnrichmentConfig()): En
       })
     : undefined;
   const metrics = config.metricsEnabled
-    ? createPrometheusRuntimeTelemetrySink({
+    ? createEnrichmentPrometheusTelemetrySink({
         identity
       })
     : undefined;
   const telemetry = combineTelemetrySinks(logSink, metrics);
   const reconciliationToken = reconciliationTokenFromEnv();
-  const bodyStore = new InMemoryEnrichmentBodyStore();
-  const productionBrokerTransport = config.dependencyMode === "production"
-    ? new PayloadRabbitMqTransport({
-        url: requiredEnv("NUTSNEWS_ENRICHMENT_RABBITMQ_URL"),
-        prefetch: config.prefetch,
-        clock: SYSTEM_RUNTIME_CLOCK,
-        ...(telemetry === undefined ? {} : {
-          telemetry
-        })
-      })
-    : undefined;
-  const productionDnsPolicy = config.dependencyMode === "production"
-    ? new DefaultEnrichmentDnsPolicy()
-    : undefined;
-  const baseDependencies = createLocalEnrichmentDependencies({
-    clock: SYSTEM_RUNTIME_CLOCK,
-    ...(productionBrokerTransport === undefined ? {} : {
-      brokerTransport: productionBrokerTransport
-    }),
-    ...(productionDnsPolicy === undefined ? {} : {
-      dnsPolicy: productionDnsPolicy,
-      httpClient: new NodeEnrichmentHttpClient({
-        bodyStore,
-        redirectDnsPolicy: productionDnsPolicy
-      }),
-      htmlParser: new SimpleEnrichmentHtmlParser(bodyStore)
-    })
-  });
-  const dependencies = {
-    ...baseDependencies,
-    workHandler: createArticleEnrichmentWorkHandler({
-      config,
-      dependencies: baseDependencies,
-      ...(telemetry === undefined ? {} : {
-        telemetry
-      })
-    })
-  };
+  const dependencies = options.dependencies ?? createApplicationDependencies(config, telemetry);
   const service = createEnrichmentService({
     config,
     dependencies,
@@ -209,22 +216,146 @@ export function createEnrichmentApplication(config = loadEnrichmentConfig()): En
       telemetry
     }),
     ...(logSink === undefined ? {} : {
-      telemetryFlusher: logSink
+      telemetryFlusher: {
+        flush: async () => {
+          try {
+            await logSink.flush();
+          } catch {
+            // Telemetry flushing is best effort and must not block shutdown.
+          }
+        }
+      }
     })
   });
 
   return {
     config,
+    diagnosticsUrl: (path) => httpServer.url(path),
     async start(): Promise<void> {
       assertPackageCompatibility();
-      await service.start();
       await httpServer.listen();
       shutdown.start();
+
+      try {
+        await withStartupTimeout(service.start(), config.startupTimeoutMs);
+      } catch (error: unknown) {
+        shutdown.stop();
+        await cleanupFailedStartup(service, httpServer, config.startupTimeoutMs);
+        throw error;
+      }
     },
     async stop(): Promise<void> {
       await shutdown.trigger("manual");
     }
   };
+}
+
+async function cleanupFailedStartup(
+  service: ReturnType<typeof createEnrichmentService>,
+  httpServer: ReturnType<typeof createEnrichmentHttpServer>,
+  timeoutMs: number
+): Promise<void> {
+  await Promise.all([
+    ignoreCleanupFailure(() => withCleanupTimeout(service.stop(), timeoutMs)),
+    ignoreCleanupFailure(() => withCleanupTimeout(httpServer.close(), timeoutMs))
+  ]);
+}
+
+async function ignoreCleanupFailure(operation: () => Promise<void>): Promise<void> {
+  try {
+    await operation();
+  } catch {
+    // Preserve the startup error after attempting every bounded cleanup step.
+  }
+}
+
+async function withCleanupTimeout(operation: Promise<void>, timeoutMs: number): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    await Promise.race([
+      operation,
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+function createApplicationDependencies(
+  config: EnrichmentConfig,
+  telemetry: RuntimeTelemetrySink | undefined
+): EnrichmentDependencies {
+  const bodyStore = new InMemoryEnrichmentBodyStore();
+  const productionBrokerTransport = config.dependencyMode === "production"
+    ? new PayloadRabbitMqTransport({
+        url: requiredEnv("NUTSNEWS_ENRICHMENT_RABBITMQ_URL"),
+        prefetch: config.prefetch,
+        connectTimeoutMs: config.startupTimeoutMs,
+        clock: SYSTEM_RUNTIME_CLOCK,
+        ...(telemetry === undefined ? {} : {
+          telemetry
+        })
+      })
+    : undefined;
+  const productionDnsPolicy = config.dependencyMode === "production"
+    ? new DefaultEnrichmentDnsPolicy()
+    : undefined;
+  const localDependencies = createLocalEnrichmentDependencies({
+    clock: SYSTEM_RUNTIME_CLOCK,
+    ...(productionBrokerTransport === undefined ? {} : {
+      brokerTransport: productionBrokerTransport
+    }),
+    ...(productionDnsPolicy === undefined ? {} : {
+      dnsPolicy: productionDnsPolicy,
+      httpClient: new NodeEnrichmentHttpClient({
+        bodyStore,
+        redirectDnsPolicy: productionDnsPolicy
+      }),
+      htmlParser: new SimpleEnrichmentHtmlParser(bodyStore)
+    })
+  });
+  const baseDependencies = config.dependencyMode === "production"
+    ? {
+        ...localDependencies,
+        ...createUnavailableProductionEnrichmentDurableAdapters()
+      }
+    : localDependencies;
+
+  return {
+    ...baseDependencies,
+    workHandler: createArticleEnrichmentWorkHandler({
+      config,
+      dependencies: baseDependencies,
+      ...(telemetry === undefined ? {} : {
+        telemetry
+      })
+    })
+  };
+}
+
+async function withStartupTimeout(operation: Promise<void>, timeoutMs: number): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(new EnrichmentStartupTimeoutError(timeoutMs));
+    }, timeoutMs);
+  });
+
+  try {
+    await Promise.race([
+      operation,
+      deadline
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function reconciliationTokenFromEnv(): string | undefined {
@@ -247,26 +378,36 @@ function combineTelemetrySinks(
   return {
     emit: async (event) => {
       for (const sink of configured) {
-        await sink.emit(event);
+        try {
+          await sink.emit(event);
+        } catch {
+          // Each telemetry sink is isolated so another sink can still receive the event.
+        }
       }
     }
   };
 }
 
-export const SUPPORTED_RUNTIME_PACKAGE_VERSION = "0.5.0";
+export const SUPPORTED_CONTRACTS_PACKAGE_VERSION = "1.0.0";
+export const SUPPORTED_RUNTIME_PACKAGE_VERSION = "1.0.0";
 
 function assertPackageCompatibility(): void {
   const contracts = getContractPackageMetadata();
   const runtime = getRuntimePackageMetadata();
   const contractsVersion: string = contracts.packageVersion;
   const runtimeVersion: string = runtime.packageVersion;
+  const runtimeContractsVersion: string = runtime.contractsPackageVersion;
 
-  if (contractsVersion !== "0.4.0") {
+  if (contractsVersion !== SUPPORTED_CONTRACTS_PACKAGE_VERSION) {
     throw new Error(`Unsupported contracts package version ${contractsVersion}.`);
   }
 
   if (runtimeVersion !== SUPPORTED_RUNTIME_PACKAGE_VERSION) {
     throw new Error(`Unsupported runtime package version ${runtimeVersion}.`);
+  }
+
+  if (runtimeContractsVersion !== SUPPORTED_CONTRACTS_PACKAGE_VERSION) {
+    throw new Error(`Unsupported runtime contracts package version ${runtimeContractsVersion}.`);
   }
 }
 

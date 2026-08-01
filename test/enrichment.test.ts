@@ -1,6 +1,7 @@
 import {
   STAGE_PAYLOAD_SCHEMA_IDS,
   STAGE_PAYLOAD_SCHEMA_VERSION,
+  getStagePayloadSchemaDefinition,
   type WorkerMessageEnvelope
 } from "@ramideltoro/nutsnews-worker-contracts";
 import {
@@ -106,6 +107,7 @@ describe("createArticleEnrichmentWorkHandler", () => {
       });
 
       const command = publishedCommand(context, 0);
+      const schema = getStagePayloadSchemaDefinition(STAGE_PAYLOAD_SCHEMA_IDS.enrichmentResult);
 
       expect(command.payload).toMatchObject({
         schemaId: STAGE_PAYLOAD_SCHEMA_IDS.enrichmentResult,
@@ -119,12 +121,17 @@ describe("createArticleEnrichmentWorkHandler", () => {
       expect(command.envelope).toMatchObject({
         route: "approval",
         causationId: uuid(7_001),
+        producer: {
+          name: schema.producer,
+          version: "0.1.0"
+        },
         aggregate: {
           type: "article",
           id: "article-001",
           version: 1
         }
       });
+      expect(schema.consumer).toBe(command.envelope.route);
       expect(context.outbox.records[0]?.command).toBe(command);
       expect(JSON.stringify(command.payload)).not.toContain("<html");
       expect(JSON.stringify(command.payload)).not.toContain("articleBody");
@@ -169,6 +176,29 @@ describe("createArticleEnrichmentWorkHandler", () => {
         imageStatus: "hydrated",
         articleMetadataRef: context.stateStore.results[0]?.metadataRef
       });
+    } finally {
+      await context.service.stop();
+    }
+  });
+
+  it("rejects mismatched envelope and payload idempotency keys before business side effects", async () => {
+    const context = createEnrichmentContext();
+
+    await context.service.start();
+
+    try {
+      await expect(context.broker.deliverEnrichment(requestDelivery(91, {
+        idempotencyKey: "canonicalizer:enrichment:different-owner:91"
+      }))).resolves.toMatchObject({
+        action: "dlq",
+        reason: "idempotency-key-mismatch"
+      });
+      expect(context.httpClient.requests).toHaveLength(0);
+      expect(context.htmlParser.inputs).toHaveLength(0);
+      expect(context.stateStore.results).toHaveLength(0);
+      expect(context.transactionRunner.transactions).toHaveLength(0);
+      expect(context.outbox.records).toHaveLength(0);
+      expect(context.broker.published).toHaveLength(0);
     } finally {
       await context.service.stop();
     }

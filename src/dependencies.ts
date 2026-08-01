@@ -13,8 +13,17 @@ export interface EnrichmentDependencyProbe {
   readonly summary: string;
 }
 
+export type EnrichmentDependencyAdapterMode = "local" | "production" | "unavailable";
+
+export interface EnrichmentDependencyAdapterModes {
+  readonly stateStore: EnrichmentDependencyAdapterMode;
+  readonly transactionRunner: EnrichmentDependencyAdapterMode;
+  readonly brokerOutbox: EnrichmentDependencyAdapterMode;
+}
+
 export interface EnrichmentStateStore extends RuntimeIdempotencyStore {
   readonly name: string;
+  readonly adapterMode: EnrichmentDependencyAdapterMode;
   probe(): EnrichmentDependencyProbe | Promise<EnrichmentDependencyProbe>;
   findResultByFingerprint(
     canonicalArticleId: string,
@@ -31,12 +40,14 @@ export interface EnrichmentDatabaseTransaction {
 
 export interface EnrichmentDatabaseTransactionRunner {
   readonly name: string;
+  readonly adapterMode: EnrichmentDependencyAdapterMode;
   probe(): EnrichmentDependencyProbe | Promise<EnrichmentDependencyProbe>;
   withTransaction<T>(operation: (transaction: EnrichmentDatabaseTransaction) => Promise<T>): Promise<T>;
 }
 
 export interface EnrichmentBrokerOutbox {
   readonly name: string;
+  readonly adapterMode: EnrichmentDependencyAdapterMode;
   probe(): EnrichmentDependencyProbe | Promise<EnrichmentDependencyProbe>;
   record(command: BrokerPublishCommand, receipt: BrokerPublishReceipt): Promise<void>;
 }
