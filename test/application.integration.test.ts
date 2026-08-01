@@ -127,8 +127,9 @@ describe("enrichment application startup", () => {
     broker.releaseConnect();
   });
 
-  it("keeps the default production application diagnostic-only until durable adapters exist", async () => {
+  it("keeps the default production application diagnostic-only when durable adapters are unreachable", async () => {
     vi.stubEnv("NUTSNEWS_ENRICHMENT_RABBITMQ_URL", "amqp://broker-secret@example.invalid");
+    vi.stubEnv("NUTSNEWS_ENRICHMENT_DATABASE_URL", "postgres://database-secret@example.invalid/enrichment");
     const config = loadEnrichmentConfig({
       HOSTNAME: "enrichment-production-application-test",
       NUTSNEWS_ENVIRONMENT: "production",
@@ -159,13 +160,16 @@ describe("enrichment application startup", () => {
     expect(readinessResponse.status).toBe(503);
     expect(readiness.status).toBe("unhealthy");
     expect(readiness.checks.find((check) => check.name === "production-adapters")).toMatchObject({
-      status: "unhealthy",
+      status: "ok",
       details: {
-        adapterMode: "unavailable",
-        stateStoreAdapter: "unavailable",
-        transactionRunnerAdapter: "unavailable",
-        brokerOutboxAdapter: "unavailable"
+        adapterMode: "production",
+        stateStoreAdapter: "production",
+        transactionRunnerAdapter: "production",
+        brokerOutboxAdapter: "production"
       }
+    });
+    expect(readiness.checks.find((check) => check.name === "enrichment-state")).toMatchObject({
+      status: "unhealthy"
     });
     expect(JSON.stringify(readiness)).not.toContain("database-secret");
     expect(JSON.stringify(readiness)).not.toContain("broker-secret");

@@ -23,7 +23,7 @@ import {
   NodeEnrichmentHttpClient,
   SimpleEnrichmentHtmlParser
 } from "./production.js";
-import { createUnavailableProductionEnrichmentDurableAdapters } from "./production-adapters.js";
+import { createProductionEnrichmentDurableAdapters } from "./production-adapters.js";
 import { PayloadRabbitMqTransport } from "./rabbitmq-transport.js";
 import {
   createEnrichmentFailClosedReconciler
@@ -94,11 +94,11 @@ export {
   SimpleEnrichmentHtmlParser
 } from "./production.js";
 export {
-  EnrichmentProductionAdapterUnavailableError,
-  UnsupportedProductionEnrichmentBrokerOutbox,
-  UnsupportedProductionEnrichmentStateStore,
-  UnsupportedProductionEnrichmentTransactionRunner,
-  createUnavailableProductionEnrichmentDurableAdapters
+  PostgresEnrichmentBrokerOutbox,
+  PostgresEnrichmentStateStore,
+  PostgresEnrichmentTransactionRunner,
+  createProductionEnrichmentDurableAdapters,
+  type ProductionEnrichmentDurableAdapters
 } from "./production-adapters.js";
 export {
   PayloadRabbitMqTransport
@@ -162,7 +162,7 @@ export function createEnrichmentApplication(
     deployment: config.dependencyMode === "production"
       ? "shadow"
       : config.environment === "test" ? "test" : "local",
-    adapter: config.dependencyMode === "production" ? "mixed" : "in_memory"
+    adapter: config.dependencyMode === "production" ? "production" : "in_memory"
   } as const;
   const logSink = config.telemetryLogs === "stdout"
     ? createJsonRuntimeTelemetrySink({
@@ -179,7 +179,10 @@ export function createEnrichmentApplication(
     : undefined;
   const telemetry = combineTelemetrySinks(logSink, metrics);
   const reconciliationToken = reconciliationTokenFromEnv();
-  const dependencies = options.dependencies ?? createApplicationDependencies(config, telemetry);
+  const applicationDependencies = options.dependencies === undefined
+    ? createApplicationDependencies(config, telemetry)
+    : { dependencies: options.dependencies };
+  const dependencies = applicationDependencies.dependencies;
   const service = createEnrichmentService({
     config,
     dependencies,
@@ -208,6 +211,9 @@ export function createEnrichmentApplication(
       },
       async () => {
         await service.stop();
+      },
+      async () => {
+        await applicationDependencies.close?.();
       }
     ],
     signalSource: process,
@@ -289,7 +295,7 @@ async function withCleanupTimeout(operation: Promise<void>, timeoutMs: number): 
 function createApplicationDependencies(
   config: EnrichmentConfig,
   telemetry: RuntimeTelemetrySink | undefined
-): EnrichmentDependencies {
+): { readonly dependencies: EnrichmentDependencies; readonly close?: () => Promise<void> } {
   const bodyStore = new InMemoryEnrichmentBodyStore();
   const productionBrokerTransport = config.dependencyMode === "production"
     ? new PayloadRabbitMqTransport({
@@ -302,38 +308,62 @@ function createApplicationDependencies(
         })
       })
     : undefined;
-  const productionDnsPolicy = config.dependencyMode === "production"
-    ? new DefaultEnrichmentDnsPolicy()
+  const productionNetworkAdapters = config.dependencyMode === "production"
+    ? (() => {
+        const dnsPolicy = new DefaultEnrichmentDnsPolicy();
+        return {
+          dnsPolicy,
+          httpClient: new NodeEnrichmentHttpClient({
+            bodyStore,
+            redirectDnsPolicy: dnsPolicy
+          })
+        };
+      })()
+    : undefined;
+  const productionDurableAdapters = config.dependencyMode === "production"
+    ? createProductionEnrichmentDurableAdapters({
+        databaseUrl: requiredEnv("NUTSNEWS_ENRICHMENT_DATABASE_URL"),
+        applicationName: config.serviceName,
+        maxConnections: Math.max(3, config.concurrency + 2),
+        timeoutMs: config.startupTimeoutMs
+      })
     : undefined;
   const localDependencies = createLocalEnrichmentDependencies({
     clock: SYSTEM_RUNTIME_CLOCK,
     ...(productionBrokerTransport === undefined ? {} : {
       brokerTransport: productionBrokerTransport
     }),
-    ...(productionDnsPolicy === undefined ? {} : {
-      dnsPolicy: productionDnsPolicy,
-      httpClient: new NodeEnrichmentHttpClient({
-        bodyStore,
-        redirectDnsPolicy: productionDnsPolicy
-      }),
+    ...(productionNetworkAdapters === undefined ? {} : {
+      dnsPolicy: productionNetworkAdapters.dnsPolicy,
+      httpClient: productionNetworkAdapters.httpClient,
       htmlParser: new SimpleEnrichmentHtmlParser(bodyStore)
     })
   });
-  const baseDependencies = config.dependencyMode === "production"
-    ? {
+  const baseDependencies = productionDurableAdapters === undefined
+    ? localDependencies
+    : {
         ...localDependencies,
-        ...createUnavailableProductionEnrichmentDurableAdapters()
-      }
-    : localDependencies;
+        ...productionDurableAdapters
+      };
 
   return {
-    ...baseDependencies,
-    workHandler: createArticleEnrichmentWorkHandler({
-      config,
-      dependencies: baseDependencies,
-      ...(telemetry === undefined ? {} : {
-        telemetry
+    dependencies: {
+      ...baseDependencies,
+      workHandler: createArticleEnrichmentWorkHandler({
+        config,
+        dependencies: baseDependencies,
+        ...(telemetry === undefined ? {} : {
+          telemetry
+        })
       })
+    },
+    ...(productionDurableAdapters === undefined ? {} : {
+      close: async () => {
+        await Promise.all([
+          productionDurableAdapters.close(),
+          productionNetworkAdapters?.httpClient.close()
+        ]);
+      }
     })
   };
 }

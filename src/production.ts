@@ -1,6 +1,9 @@
+import { lookup as dnsLookup } from "node:dns";
 import dns from "node:dns/promises";
 import net from "node:net";
 import { TextDecoder } from "node:util";
+
+import { Agent } from "undici";
 
 import type {
   EnrichmentDependencyProbe,
@@ -27,6 +30,10 @@ interface HtmlTag {
 }
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+type LookupAll = (
+  hostname: string,
+  callback: (error: NodeJS.ErrnoException | null, addresses: readonly { readonly address: string; readonly family: number }[]) => void
+) => void;
 
 export class EnrichmentHttpError extends Error {
   readonly reason: string;
@@ -85,6 +92,7 @@ export class NodeEnrichmentHttpClient implements EnrichmentHttpClient {
   private readonly bodyStore: InMemoryEnrichmentBodyStore;
   private readonly fetchImpl: FetchLike;
   private readonly redirectDnsPolicy: EnrichmentDnsPolicy;
+  private readonly dispatcher: Agent | undefined;
 
   constructor(options: {
     readonly bodyStore: InMemoryEnrichmentBodyStore;
@@ -94,6 +102,13 @@ export class NodeEnrichmentHttpClient implements EnrichmentHttpClient {
     this.bodyStore = options.bodyStore;
     this.fetchImpl = options.fetch ?? fetch;
     this.redirectDnsPolicy = options.redirectDnsPolicy ?? new DefaultEnrichmentDnsPolicy();
+    this.dispatcher = options.fetch === undefined
+      ? new Agent({
+          connect: {
+            lookup: createProtectedAddressLookup()
+          }
+        })
+      : undefined;
   }
 
   probe(): EnrichmentDependencyProbe {
@@ -101,6 +116,10 @@ export class NodeEnrichmentHttpClient implements EnrichmentHttpClient {
       status: "ok",
       summary: "node enrichment HTTP client ready"
     };
+  }
+
+  async close(): Promise<void> {
+    await this.dispatcher?.close();
   }
 
   async fetch(request: EnrichmentHttpFetchRequest): Promise<EnrichmentHttpFetchResponse> {
@@ -206,7 +225,10 @@ export class NodeEnrichmentHttpClient implements EnrichmentHttpClient {
           "user-agent": "NutsNewsWorkerEnrichment/0.1"
         },
         redirect: "manual",
-        signal: controller.signal
+        signal: controller.signal,
+        ...(this.dispatcher === undefined ? {} : {
+          dispatcher: this.dispatcher as unknown as NonNullable<RequestInit["dispatcher"]>
+        })
       });
     } catch (error: unknown) {
       if (error instanceof Error && error.name === "AbortError") {
@@ -232,6 +254,43 @@ export class NodeEnrichmentHttpClient implements EnrichmentHttpClient {
       });
     }
   }
+}
+
+export function createProtectedAddressLookup(lookupAll: LookupAll = defaultLookupAll): net.LookupFunction {
+  return (hostname, options, callback) => {
+    lookupAll(hostname, (error, addresses) => {
+      if (error !== null) {
+        callback(error, [], undefined);
+        return;
+      }
+      const blocked = addresses.find((address) => protectedAddressReason(address.address) !== undefined);
+      if (blocked !== undefined) {
+        const policyError = new Error("Enrichment connection target failed network policy.") as NodeJS.ErrnoException;
+        policyError.code = "EACCES";
+        callback(policyError, [], undefined);
+        return;
+      }
+      const first = addresses[0];
+      if (first === undefined) {
+        const emptyError = new Error("Enrichment DNS lookup returned no addresses.") as NodeJS.ErrnoException;
+        emptyError.code = "ENOTFOUND";
+        callback(emptyError, [], undefined);
+        return;
+      }
+      if (options.all === true) {
+        callback(null, [...addresses], undefined);
+      } else {
+        callback(null, first.address, first.family);
+      }
+    });
+  };
+}
+
+function defaultLookupAll(hostname: string, callback: Parameters<LookupAll>[1]): void {
+  dnsLookup(hostname, {
+    all: true,
+    verbatim: true
+  }, callback);
 }
 
 export class DefaultEnrichmentDnsPolicy implements EnrichmentDnsPolicy {

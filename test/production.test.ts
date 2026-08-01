@@ -7,7 +7,8 @@ import {
 import {
   DefaultEnrichmentDnsPolicy,
   InMemoryEnrichmentBodyStore,
-  SimpleEnrichmentHtmlParser
+  SimpleEnrichmentHtmlParser,
+  createProtectedAddressLookup
 } from "../src/production.js";
 
 describe("production enrichment dependencies", () => {
@@ -56,5 +57,19 @@ describe("production enrichment dependencies", () => {
       allowed: false,
       reason: "metadata-address"
     });
+  });
+
+  it("fails the socket lookup before connect when DNS resolves to a protected address", async () => {
+    const lookup = createProtectedAddressLookup((_hostname, callback) => {
+      callback(null, [{ address: "169.254.169.254", family: 4 }]);
+    });
+
+    const error = await new Promise<NodeJS.ErrnoException | null>((resolve) => {
+      lookup("attacker.example", { all: false }, (lookupError) => {
+        resolve(lookupError);
+      });
+    });
+
+    expect(error).toMatchObject({ code: "EACCES" });
   });
 });
