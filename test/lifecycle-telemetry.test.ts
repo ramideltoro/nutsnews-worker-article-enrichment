@@ -123,14 +123,15 @@ describe("enrichment lifecycle telemetry", () => {
 
     const initialOutput = context.metrics.collect();
     const initialCanonicalSeries = canonicalStageSeriesKeys(initialOutput);
-    expect(initialCanonicalSeries).toHaveLength(21);
+    expect(initialCanonicalSeries).toHaveLength(22);
 
     for (const outcome of [
       "success",
       "duplicate",
       "invalid",
       "retry",
-      "dlq"
+      "dlq",
+      "failure"
     ]) {
       expect(metricValue(initialOutput, "nutsnews_worker_uplift_stage_events_total", outcome)).toBe(0);
     }
@@ -186,6 +187,7 @@ describe("enrichment lifecycle telemetry", () => {
     expect(metricValue(output, "nutsnews_worker_uplift_stage_events_total", "invalid")).toBe(1);
     expect(metricValue(output, "nutsnews_worker_uplift_stage_events_total", "retry")).toBe(1);
     expect(metricValue(output, "nutsnews_worker_uplift_stage_events_total", "dlq")).toBe(2);
+    expect(metricValue(output, "nutsnews_worker_uplift_stage_events_total", "failure")).toBe(0);
     expect(sampleValue(output, "nutsnews_worker_uplift_stage_latency_seconds_bucket", {
       le: "30"
     })).toBe(6);

@@ -27,7 +27,7 @@ The article enrichment service owns the worker-uplift service boundary that cons
 7. Validate incoming envelopes and enrichment-stage payloads before delegated work.
 8. Claim the durable idempotency interface before delegating to the injected handler.
 9. Convert Runtime 0.5 claim, completion, and failure-record store exceptions into explicitly classified retry/DLQ dispositions instead of allowing a delivery to escape without a broker action.
-10. Emit exactly one terminal `success`, `duplicate`, `invalid`, `retry`, or `dlq` lifecycle event for every started delivery; derive canonical counters and fixed-bucket latency from those events.
+10. Expose the bounded `success`, `duplicate`, `invalid`, `retry`, `dlq`, and `failure` outcome set from the first scrape, emit exactly one classified terminal lifecycle event for every started delivery, and derive canonical counters and fixed-bucket latency from those events.
 11. Expose durable transaction and broker outbox tools to the handler.
 12. Bound HTTP client, DNS policy, HTML parser, state, transaction, and outbox readiness probes while keeping liveness and startup independent.
 13. Re-check durable production adapters before every accepted delivery; cancel and unregister the consumer on degradation so reconnect cannot restore unsafe consumption.

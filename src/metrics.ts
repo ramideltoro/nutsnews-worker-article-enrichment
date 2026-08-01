@@ -23,7 +23,7 @@ export const ENRICHMENT_STAGE_LATENCY_BUCKETS_SECONDS = [
   300
 ] as const;
 
-export type EnrichmentStageOutcome = "success" | "duplicate" | "invalid" | "retry" | "dlq";
+export type EnrichmentStageOutcome = "success" | "duplicate" | "invalid" | "retry" | "dlq" | "failure";
 export type EnrichmentHealthProbe = "liveness" | "startup" | "readiness";
 export type EnrichmentHealthOutcome = "ok" | "degraded" | "unhealthy";
 
@@ -56,7 +56,8 @@ const ENRICHMENT_STAGE_OUTCOMES = [
   "duplicate",
   "invalid",
   "retry",
-  "dlq"
+  "dlq",
+  "failure"
 ] as const satisfies readonly EnrichmentStageOutcome[];
 const HEALTH_PROBES = [
   "liveness",
@@ -75,7 +76,12 @@ export function createEnrichmentPrometheusTelemetrySink(
 ): EnrichmentPrometheusTelemetrySink {
   const runtime = createPrometheusRuntimeTelemetrySink(options);
   const environment = metricLabelValue(options.identity.environment);
-  const counters = new Map<EnrichmentStageOutcome, number>();
+  const counters = new Map<EnrichmentStageOutcome, number>(
+    ENRICHMENT_STAGE_OUTCOMES.map((outcome) => [
+      outcome,
+      0
+    ])
+  );
   const bucketCounts = ENRICHMENT_STAGE_LATENCY_BUCKETS_SECONDS.map(() => 0);
   const health = new Map<EnrichmentHealthProbe, EnrichmentHealthOutcome>([
     [

@@ -41,7 +41,7 @@ Production mode does not fall back to the local in-memory acknowledgement path, 
 
 `/metrics` also exports the Grafana worker-uplift contract:
 
-- `nutsnews_worker_uplift_stage_events_total{environment,service,outcome}` counts one terminal lifecycle outcome (`success`, `duplicate`, `invalid`, `retry`, or `dlq`) for every started enrichment delivery;
+- `nutsnews_worker_uplift_stage_events_total{environment,service,outcome}` exposes the bounded `success`, `duplicate`, `invalid`, `retry`, `dlq`, and `failure` outcome set from the first scrape, then counts exactly one classified terminal lifecycle outcome for every started enrichment delivery;
 - `nutsnews_worker_uplift_stage_latency_seconds` is a fixed-bucket histogram with `0.01`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`, `30`, `60`, `120`, and `300` second boundaries plus `+Inf`;
 - `nutsnews_worker_health_probe{environment,service,probe,outcome}` keeps liveness, startup, and readiness distinct;
 - `nutsnews_worker_consumer_active{environment,service,queue}` reports the main-queue consumer count; and
