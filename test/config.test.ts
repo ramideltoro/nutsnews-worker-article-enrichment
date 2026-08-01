@@ -18,6 +18,7 @@ describe("loadEnrichmentConfig", () => {
     expect(config).toMatchObject({
       serviceName: "nutsnews-worker-article-enrichment",
       dependencyMode: "test",
+      buildRevision: "development",
       host: "enrichment-host",
       concurrency: 6,
       prefetch: 12,
@@ -36,6 +37,7 @@ describe("loadEnrichmentConfig", () => {
         timeoutMs: 5_000,
         maxDomNodes: 50_000
       },
+      startupTimeoutMs: 30_000,
       shadowMode: true,
       dependencies: {
         databaseConfigured: false,
@@ -59,11 +61,20 @@ describe("loadEnrichmentConfig", () => {
 
       expect(configError.issues).toEqual([
         "NUTSNEWS_ENRICHMENT_DATABASE_URL is required when NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE=production.",
-        "NUTSNEWS_ENRICHMENT_RABBITMQ_URL is required when NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE=production."
+        "NUTSNEWS_ENRICHMENT_RABBITMQ_URL is required when NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE=production.",
+        "NUTSNEWS_ENRICHMENT_BUILD_REVISION must be a lowercase 40-character Git commit SHA when NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE=production."
       ]);
       expect(configError.message).not.toContain("postgres://");
       expect(configError.message).not.toContain("amqp://");
     }
+  });
+
+  it("fails closed when a production environment omits production dependency mode", () => {
+    expect(() => loadEnrichmentConfig({
+      NUTSNEWS_ENVIRONMENT: "production"
+    })).toThrowError(
+      "NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE must be production when NUTSNEWS_ENVIRONMENT=production."
+    );
   });
 
   it("rejects unsafe bounds and shadow cutover in this repo", () => {
@@ -78,6 +89,7 @@ describe("loadEnrichmentConfig", () => {
       NUTSNEWS_ENRICHMENT_PER_HOST_CONCURRENCY: "4",
       NUTSNEWS_ENRICHMENT_PARSER_TIMEOUT_MS: "10",
       NUTSNEWS_ENRICHMENT_MAX_DOM_NODES: "10",
+      NUTSNEWS_ENRICHMENT_STARTUP_TIMEOUT_MS: "10",
       NUTSNEWS_ENRICHMENT_SHADOW_MODE: "false"
     })).toThrow(EnrichmentConfigError);
   });
@@ -85,6 +97,7 @@ describe("loadEnrichmentConfig", () => {
   it("accepts explicit production dependency presence without retaining values", () => {
     const config = loadEnrichmentConfig({
       NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE: "production",
+      NUTSNEWS_ENRICHMENT_BUILD_REVISION: "0123456789abcdef0123456789abcdef01234567",
       NUTSNEWS_ENRICHMENT_DATABASE_URL: "postgres://example.invalid/worker",
       NUTSNEWS_ENRICHMENT_RABBITMQ_URL: "amqp://example.invalid",
       NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS: "silent"
@@ -94,6 +107,7 @@ describe("loadEnrichmentConfig", () => {
       databaseConfigured: true,
       rabbitmqConfigured: true
     });
+    expect(config.buildRevision).toBe("0123456789abcdef0123456789abcdef01234567");
     expect(JSON.stringify(config)).not.toContain("postgres://example.invalid");
     expect(JSON.stringify(config)).not.toContain("amqp://example.invalid");
   });

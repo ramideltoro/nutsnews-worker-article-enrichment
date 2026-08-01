@@ -35,7 +35,21 @@ Local and CI installs use the owner-scoped GitHub Packages npm registry. No pack
 
 This repository overrides the runtime package's nested contracts dependency to `0.4.0` so runtime payload validation recognizes `enrichmentRequest` until a later runtime release depends on that contract version directly.
 
-`/ready` is unhealthy whenever the `enrichment` main queue has zero active consumers. Consumer cancellation and channel-drop recovery emit bounded structured runtime events and Prometheus consumer-state metrics.
+`/ready` is unhealthy whenever the `enrichment` main queue has zero active consumers. Every dependency readiness probe is bounded by `NUTSNEWS_ENRICHMENT_STARTUP_TIMEOUT_MS`. Consumer cancellation and channel-drop recovery emit bounded structured runtime events and Prometheus consumer-state metrics. The HTTP diagnostics listener binds before broker startup, and broker startup is bounded by the same deadline, so `/live`, `/startup`, `/ready`, and `/metrics` expose fail-closed state while startup is pending. Failed-startup cleanup closes diagnostics independently even if broker cleanup stalls.
+
+Production mode does not fall back to the local in-memory acknowledgement path, and `NUTSNEWS_ENVIRONMENT=production` is rejected unless dependency mode is also `production`. Until real PostgreSQL state, transaction, and broker-outbox adapters are implemented, all three production durable adapters report `unavailable`, broker topology is not asserted, no consumer is registered, and readiness remains unhealthy. Even adapters identified as `production` must pass bounded startup probes before the broker can connect. If a production adapter degrades after startup, the current delivery receives an explicit retry/DLQ disposition and the consumer is cancelled and unregistered so RabbitMQ recovery cannot silently resume it. Liveness and startup remain available for diagnostics while this shadow-only service is safely inactive.
+
+`/metrics` also exports the Grafana worker-uplift contract:
+
+- `nutsnews_worker_uplift_stage_events_total{environment,service,outcome}` counts one terminal lifecycle outcome (`success`, `duplicate`, `invalid`, `retry`, or `dlq`) for every started enrichment delivery;
+- `nutsnews_worker_uplift_stage_latency_seconds` is a fixed-bucket histogram with `0.01`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`, `30`, `60`, `120`, and `300` second boundaries plus `+Inf`;
+- `nutsnews_worker_health_probe{environment,service,probe,outcome}` keeps liveness, startup, and readiness distinct;
+- `nutsnews_worker_consumer_active{environment,service,queue}` reports the main-queue consumer count; and
+- `nutsnews_worker_expected_active{environment,service}` is `0` while this service is shadow-only, so consumer and freshness alerting remains gated until protected cutover.
+
+Only bounded operational dimensions are metric labels. Message, article, feed, idempotency, correlation, and trace identifiers remain structured log fields and are never Prometheus labels.
+
+The liveness/startup/readiness gauges are present on the first scrape: liveness starts healthy while startup and readiness start fail-closed, startup follows the service lifecycle, and readiness changes only from an evaluated readiness result or a known consumer shutdown. Runtime 0.5 claim, completion, and failure-record store exceptions are converted into explicitly classified retry or DLQ dispositions; each started delivery still emits exactly one terminal lifecycle outcome and is never discarded by an uncaught store exception. Telemetry, log, metric, and telemetry-flush failures are best effort and cannot change message acknowledgement, idempotency, retry, or DLQ behavior. Duration-less dependency events remain available in structured logs but are not forwarded into legacy duration summaries, and startup does not emit a fabricated zero-millisecond dependency observation.
 
 ## Configuration
 
@@ -43,6 +57,8 @@ The value-free configuration schema lives in `src/config.ts` and is exposed at `
 
 Important variables:
 
+- `NUTSNEWS_ENVIRONMENT`: `production` requires production dependency mode
+- `NUTSNEWS_ENRICHMENT_BUILD_REVISION`: production requires the immutable lowercase 40-character Git SHA baked into the image
 - `NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE`: `test` or `production`
 - `NUTSNEWS_ENRICHMENT_DATABASE_URL`
 - `NUTSNEWS_ENRICHMENT_RABBITMQ_URL`
@@ -59,13 +75,14 @@ Important variables:
 - `NUTSNEWS_ENRICHMENT_PER_HOST_CONCURRENCY`
 - `NUTSNEWS_ENRICHMENT_PARSER_TIMEOUT_MS`
 - `NUTSNEWS_ENRICHMENT_MAX_DOM_NODES`
+- `NUTSNEWS_ENRICHMENT_STARTUP_TIMEOUT_MS`
 - `NUTSNEWS_ENRICHMENT_SHADOW_MODE`
 
 `NUTSNEWS_ENRICHMENT_SHADOW_MODE` must remain `true` until backend-owned cutover work explicitly changes the deployment contract.
 
 ## Service Boundary
 
-The service registers the contracted `enrichment` consumer route and downstream `approval` publish route through the shared runtime broker lifecycle. The message processor validates worker envelopes and enrichment-stage payloads, applies the durable idempotency interface, delegates work to the injected enrichment handler, and drains in-flight deliveries during shutdown.
+The service registers the contracted `enrichment` consumer route and downstream `approval` publish route through the shared runtime broker lifecycle. The shared message processor validates worker envelopes and enrichment-stage payloads, applies the durable idempotency interface, emits exactly one terminal lifecycle outcome for every started delivery, delegates work to the injected enrichment handler, and drains in-flight deliveries during shutdown.
 
 The enrichment handler:
 
@@ -89,6 +106,8 @@ The repository includes test interfaces and local doubles for:
 - DNS/SSRF policy;
 - HTML metadata parser;
 - enrichment work handler.
+
+Those local state, transaction, and outbox doubles are accepted only when `NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE=test`. Adapter identity is part of each durable dependency interface, and production consumer registration requires every durable adapter to identify as `production`.
 
 The repository does not implement identity, canonical dedupe, AI decisioning, approval, translation, persistence, publication, or user-facing article publication.
 

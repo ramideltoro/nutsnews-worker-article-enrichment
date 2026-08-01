@@ -23,6 +23,7 @@ interface FakeBroker {
 
 interface FakeConnection {
   readonly channel: FakeChannel;
+  readonly closeCalls: number;
   emitClose(): void;
   toChannelModel(): ChannelModel;
 }
@@ -90,6 +91,25 @@ describe("RabbitMQ payload transport", () => {
 
     await transport.close();
   });
+
+  it("closes and rejects a connection that completes after transport shutdown", async () => {
+    const connection = createFakeConnection();
+    const connectGate = deferred<ChannelModel>();
+    const transport = new PayloadRabbitMqTransport({
+      url: "amqp://enrichment:test@example.invalid:5672",
+      prefetch: 4,
+      clock,
+      connect: () => connectGate.promise,
+      connectTimeoutMs: 100
+    });
+    const connecting = transport.connect();
+
+    await transport.close();
+    connectGate.resolve(connection.toChannelModel());
+
+    await expect(connecting).rejects.toThrow("RabbitMQ payload transport closed during connection startup.");
+    expect(connection.closeCalls).toBe(1);
+  });
 });
 
 function createFakeBroker(): FakeBroker {
@@ -109,11 +129,13 @@ function createFakeBroker(): FakeBroker {
 function createFakeConnection(): FakeConnection {
   const channel = createFakeChannel();
   const closeHandlers: CloseHandler[] = [];
+  let closeCalls = 0;
   const connection = {
     createConfirmChannel(): Promise<ConfirmChannel> {
       return Promise.resolve(channel.toConfirmChannel());
     },
     close(): Promise<void> {
+      closeCalls += 1;
       for (const handler of closeHandlers) {
         handler();
       }
@@ -131,6 +153,9 @@ function createFakeConnection(): FakeConnection {
 
   return {
     channel,
+    get closeCalls(): number {
+      return closeCalls;
+    },
     emitClose(): void {
       for (const handler of closeHandlers) {
         handler();
@@ -139,6 +164,21 @@ function createFakeConnection(): FakeConnection {
     toChannelModel(): ChannelModel {
       return connection as unknown as ChannelModel;
     }
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return {
+    promise,
+    resolve,
+    reject
   };
 }
 

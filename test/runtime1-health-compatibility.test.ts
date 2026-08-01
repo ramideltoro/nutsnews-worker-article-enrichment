@@ -1,0 +1,103 @@
+import type { RuntimeTelemetryEvent } from "@ramideltoro/nutsnews-worker-runtime";
+import {
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi
+} from "vitest";
+
+const runtime1Delegate = vi.hoisted(() => ({
+  emittedEventNames: [] as string[],
+  output: ""
+}));
+
+vi.mock("@ramideltoro/nutsnews-worker-runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ramideltoro/nutsnews-worker-runtime")>();
+
+  return {
+    ...actual,
+    createPrometheusRuntimeTelemetrySink: () => ({
+      allowedLabels: actual.RUNTIME_ALLOWED_METRIC_LABELS,
+      emit(event: RuntimeTelemetryEvent): void {
+        runtime1Delegate.emittedEventNames.push(event.name);
+
+        if (event.name === "runtime.health.evaluated") {
+          runtime1Delegate.output = [
+            "# HELP nutsnews_worker_health_probe Worker liveness, startup, and readiness state by probe and outcome.",
+            "# TYPE nutsnews_worker_health_probe gauge",
+            'nutsnews_worker_health_probe{environment="production",host="backend-vps",service="nutsnews-worker-article-enrichment",version="1.0.0",outcome="degraded",probe="readiness"} 1'
+          ].join("\n");
+        }
+      },
+      collect(): string {
+        return runtime1Delegate.output;
+      },
+      setInFlight(): void {
+        // Runtime1-like delegate method retained for wrapper compatibility.
+      },
+      setShutdownDraining(): void {
+        // Runtime1-like delegate method retained for wrapper compatibility.
+      }
+    })
+  };
+});
+
+import { createEnrichmentPrometheusTelemetrySink } from "../src/metrics.js";
+
+describe("Runtime1 health metric compatibility", () => {
+  beforeEach(() => {
+    runtime1Delegate.emittedEventNames.length = 0;
+    runtime1Delegate.output = "";
+  });
+
+  it("keeps the service-owned health family singular while other events reach Runtime1", async () => {
+    const metrics = createEnrichmentPrometheusTelemetrySink({
+      identity: {
+        service: "nutsnews-worker-article-enrichment",
+        version: "1.0.0",
+        environment: "production",
+        host: "backend-vps",
+        revision: "0123456789abcdef0123456789abcdef01234567",
+        deployment: "shadow",
+        adapter: "mixed"
+      }
+    });
+
+    await metrics.emit({
+      name: "runtime.health.evaluated",
+      level: "warn",
+      at: "2026-08-01T00:00:00.000Z",
+      outcome: "degraded",
+      attributes: {
+        probe: "readiness",
+        status: "degraded"
+      }
+    });
+    await metrics.emit({
+      name: "runtime.message.started",
+      level: "info",
+      at: "2026-08-01T00:00:01.000Z",
+      stage: "enrichment",
+      queue: "nutsnews.worker.enrichment.v1",
+      outcome: "started"
+    });
+
+    const output = metrics.collect();
+    const lines = output.split("\n");
+    const healthSamples = lines.filter((line) => line.startsWith("nutsnews_worker_health_probe{"));
+    const healthSeries = healthSamples.map((line) => line.slice(0, line.lastIndexOf(" ")));
+
+    expect(runtime1Delegate.emittedEventNames).toEqual([
+      "runtime.message.started"
+    ]);
+    expect(lines.filter((line) => line.startsWith("# HELP nutsnews_worker_health_probe "))).toHaveLength(1);
+    expect(lines.filter((line) => line === "# TYPE nutsnews_worker_health_probe gauge")).toHaveLength(1);
+    expect(healthSamples).toHaveLength(9);
+    expect(new Set(healthSeries).size).toBe(healthSamples.length);
+    expect(output).toContain(
+      'nutsnews_worker_health_probe{environment="production",service="enrichment",probe="readiness",outcome="degraded"} 1'
+    );
+    expect(output).not.toContain('nutsnews_worker_health_probe{environment="production",host="backend-vps"');
+  });
+});

@@ -64,6 +64,7 @@ export class ManualEnrichmentClock implements RuntimeClock {
 
 export class InMemoryEnrichmentStateStore implements EnrichmentStateStore {
   readonly name: string = "local-enrichment-state";
+  readonly adapterMode = "local" as const;
   status: EnrichmentDependencyProbe["status"] = "ok";
   readonly results: EnrichmentStoredResult[] = [];
   private readonly store;
@@ -112,6 +113,7 @@ export class InMemoryEnrichmentStateStore implements EnrichmentStateStore {
 
 export class LocalEnrichmentTransactionRunner implements EnrichmentDatabaseTransactionRunner {
   readonly name: string = "local-database-transactions";
+  readonly adapterMode = "local" as const;
   status: EnrichmentDependencyProbe["status"] = "ok";
   readonly transactions: EnrichmentDatabaseTransaction[] = [];
 
@@ -135,6 +137,7 @@ export class LocalEnrichmentTransactionRunner implements EnrichmentDatabaseTrans
 
 export class LocalEnrichmentBrokerOutbox implements EnrichmentBrokerOutbox {
   readonly name: string = "local-broker-outbox";
+  readonly adapterMode = "local" as const;
   status: EnrichmentDependencyProbe["status"] = "ok";
   readonly records: { readonly command: BrokerPublishCommand; readonly receipt: BrokerPublishReceipt }[] = [];
 

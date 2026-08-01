@@ -9,6 +9,7 @@ import {
 } from "vitest";
 
 import { loadEnrichmentConfig } from "../src/config.js";
+import { createEnrichmentPrometheusTelemetrySink } from "../src/metrics.js";
 import { createEnrichmentService } from "../src/service.js";
 import {
   InMemoryEnrichmentStateStore,
@@ -38,7 +39,8 @@ describe("createEnrichmentService", () => {
     expect((await context.service.health.liveness()).status).toBe("ok");
     expect((await context.service.health.startup()).status).toBe("ok");
     expect((await context.service.health.readiness()).status).toBe("ok");
-    expect(context.metrics.collect()).toContain("nutsnews_worker_dependency_duration_ms");
+    expect(context.metrics.collect()).toContain("nutsnews_worker_inflight");
+    expect(context.metrics.collect()).not.toContain("nutsnews_worker_dependency_duration_ms");
 
     await context.service.stop();
 
@@ -129,12 +131,186 @@ describe("createEnrichmentService", () => {
 
     await context.service.stop();
   });
+
+  it("does not connect or consume in production when durable adapters are local", async () => {
+    const config = loadEnrichmentConfig({
+      HOSTNAME: "enrichment-production-test",
+      NUTSNEWS_ENVIRONMENT: "production",
+      NUTSNEWS_ENRICHMENT_BUILD_REVISION: "0123456789abcdef0123456789abcdef01234567",
+      NUTSNEWS_ENRICHMENT_DATABASE_URL: "postgres://secret@example.invalid/enrichment",
+      NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE: "production",
+      NUTSNEWS_ENRICHMENT_HTTP_PORT: "0",
+      NUTSNEWS_ENRICHMENT_RABBITMQ_URL: "amqp://secret@example.invalid",
+      NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS: "silent"
+    });
+    const dependencies = createLocalEnrichmentDependencies();
+    const metrics = createEnrichmentPrometheusTelemetrySink({
+      identity: {
+        service: config.serviceName,
+        version: config.serviceVersion,
+        environment: config.environment,
+        host: config.host
+      }
+    });
+    const service = createEnrichmentService({
+      config,
+      dependencies,
+      metrics
+    });
+
+    await service.start();
+
+    expect(service.isStarted).toBe(true);
+    expect(service.consumer).toBeUndefined();
+    expect(service.broker.state).toBe("idle");
+    expect((dependencies.brokerTransport as LocalBrokerTransport).assertedRoutes).toHaveLength(0);
+    await expect((dependencies.brokerTransport as LocalBrokerTransport).deliverEnrichment()).rejects.toThrow(
+      "No local consumer is registered for enrichment."
+    );
+    expect((await service.health.liveness()).status).toBe("ok");
+    expect((await service.health.startup()).status).toBe("ok");
+
+    const readiness = await service.health.readiness();
+
+    expect(readiness.status).toBe("unhealthy");
+    expect(readiness.checks.find((check) => check.name === "production-adapters")).toMatchObject({
+      status: "unhealthy",
+      details: {
+        mode: "production",
+        reason: "production-durable-adapters-unavailable",
+        adapterMode: "local",
+        stateStoreAdapter: "local",
+        transactionRunnerAdapter: "local",
+        brokerOutboxAdapter: "local"
+      }
+    });
+    expect(JSON.stringify(readiness)).not.toContain("secret");
+    expect(metrics.collect()).toContain('nutsnews_worker_consumer_active{environment="production",service="enrichment",queue="nutsnews.worker.enrichment.v1"} 0');
+    expect(metrics.collect()).toContain('nutsnews_worker_expected_active{environment="production",service="enrichment"} 0');
+
+    await service.stop();
+  });
+
+  it("requires healthy production durable probes before connecting the broker", async () => {
+    const config = loadEnrichmentConfig({
+      NUTSNEWS_ENRICHMENT_DATABASE_URL: "postgres://example.invalid/enrichment",
+      NUTSNEWS_ENRICHMENT_BUILD_REVISION: "0123456789abcdef0123456789abcdef01234567",
+      NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE: "production",
+      NUTSNEWS_ENRICHMENT_HTTP_PORT: "0",
+      NUTSNEWS_ENRICHMENT_RABBITMQ_URL: "amqp://example.invalid",
+      NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS: "silent"
+    });
+    const dependencies = createLocalEnrichmentDependencies();
+
+    setProductionAdapterMode(dependencies.stateStore);
+    setProductionAdapterMode(dependencies.transactionRunner);
+    setProductionAdapterMode(dependencies.brokerOutbox);
+    (dependencies.stateStore as InMemoryEnrichmentStateStore).status = "unhealthy";
+
+    const service = createEnrichmentService({
+      config,
+      dependencies
+    });
+
+    await service.start();
+
+    expect(service.consumer).toBeUndefined();
+    expect(service.broker.state).toBe("idle");
+    expect((dependencies.brokerTransport as LocalBrokerTransport).assertedRoutes).toHaveLength(0);
+    expect((await service.health.readiness()).status).toBe("unhealthy");
+
+    await service.stop();
+  });
+
+  it("cancels an active production consumer and disposes the current delivery when durability degrades", async () => {
+    const config = loadEnrichmentConfig({
+      HOSTNAME: "enrichment-production-degradation-test",
+      NUTSNEWS_ENVIRONMENT: "production",
+      NUTSNEWS_ENRICHMENT_BUILD_REVISION: "0123456789abcdef0123456789abcdef01234567",
+      NUTSNEWS_ENRICHMENT_DATABASE_URL: "postgres://example.invalid/enrichment",
+      NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE: "production",
+      NUTSNEWS_ENRICHMENT_HTTP_PORT: "0",
+      NUTSNEWS_ENRICHMENT_RABBITMQ_URL: "amqp://example.invalid",
+      NUTSNEWS_ENRICHMENT_STARTUP_TIMEOUT_MS: "100",
+      NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS: "silent"
+    });
+    const dependencies = createLocalEnrichmentDependencies();
+    const telemetry = createBufferedRuntimeTelemetrySink();
+
+    setProductionAdapterMode(dependencies.stateStore);
+    setProductionAdapterMode(dependencies.transactionRunner);
+    setProductionAdapterMode(dependencies.brokerOutbox);
+
+    const service = createEnrichmentService({
+      config,
+      dependencies,
+      telemetry
+    });
+    const broker = dependencies.brokerTransport as LocalBrokerTransport;
+    const stateStore = dependencies.stateStore as InMemoryEnrichmentStateStore;
+    const workHandler = dependencies.workHandler as LocalEnrichmentWorkHandler;
+
+    await service.start();
+    telemetry.clear();
+    stateStore.status = "degraded";
+
+    await expect(broker.deliverEnrichment()).resolves.toMatchObject({
+      action: "retry",
+      reason: "production-durable-adapters-unhealthy"
+    });
+    expect(workHandler.handled).toHaveLength(0);
+    expect(service.consumer).toBeUndefined();
+    expect(service.broker.consumerStatus("enrichment").activeConsumers).toBe(0);
+    expect(telemetry.events.filter((event) => event.name.startsWith("runtime.message.")).map((event) => event.name)).toEqual([
+      "runtime.message.started",
+      "runtime.message.retry"
+    ]);
+
+    stateStore.status = "ok";
+    await expect(broker.deliverEnrichment()).rejects.toThrow("No local consumer is registered for enrichment.");
+    expect((await service.health.readiness()).status).toBe("unhealthy");
+
+    await service.stop();
+  });
+
+  it("bounds readiness dependency probes that never settle", async () => {
+    const context = createServiceContext({
+      NUTSNEWS_ENRICHMENT_STARTUP_TIMEOUT_MS: "100"
+    });
+
+    await context.service.start();
+    Object.defineProperty(context.httpClient, "probe", {
+      configurable: true,
+      value: () => new Promise<never>(() => undefined)
+    });
+    const startedAt = Date.now();
+    const readiness = await context.service.health.readiness();
+
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(readiness.status).toBe("unhealthy");
+    expect(readiness.checks.find((check) => check.name === "http-client")).toMatchObject({
+      status: "unhealthy",
+      details: {
+        summary: "dependency probe timed out"
+      }
+    });
+
+    await context.service.stop();
+  });
 });
 
-function createServiceContext() {
+function setProductionAdapterMode(dependency: { readonly adapterMode: string }): void {
+  Object.defineProperty(dependency, "adapterMode", {
+    configurable: true,
+    value: "production"
+  });
+}
+
+function createServiceContext(env: NodeJS.ProcessEnv = {}) {
   const config = loadEnrichmentConfig({
     NUTSNEWS_ENRICHMENT_HTTP_PORT: "0",
-    NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS: "silent"
+    NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS: "silent",
+    ...env
   });
   const dependencies = createLocalEnrichmentDependencies();
   const telemetry = createBufferedRuntimeTelemetrySink();
