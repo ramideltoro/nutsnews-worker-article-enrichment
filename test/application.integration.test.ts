@@ -46,9 +46,7 @@ describe("enrichment application startup", () => {
     const metricsBeforeStartup = await fetch(application.diagnosticsUrl("/metrics"));
 
     expect(metricsBeforeStartup.status).toBe(200);
-    expect(await metricsBeforeStartup.text()).toContain(
-      'nutsnews_worker_consumer_active{environment="test",service="enrichment",queue="nutsnews.worker.enrichment.v1"} 0'
-    );
+    expect(await metricsBeforeStartup.text()).toContain('queue="nutsnews.worker.enrichment.v1",outcome="active"} 0');
 
     broker.releaseConnect();
     await expect(starting).resolves.toBeUndefined();
@@ -175,10 +173,8 @@ describe("enrichment application startup", () => {
     const metricsResponse = await fetch(application.diagnosticsUrl("/metrics"));
     const metrics = await metricsResponse.text();
 
-    expect(metrics).toContain(
-      'nutsnews_worker_consumer_active{environment="production",service="enrichment",queue="nutsnews.worker.enrichment.v1"} 0'
-    );
-    expect(metrics).toContain('nutsnews_worker_expected_active{environment="production",service="enrichment"} 0');
+    expect(metrics).toContain('queue="nutsnews.worker.enrichment.v1",outcome="active"} 0');
+    expect(metrics).toContain('nutsnews_worker_expected_active{environment="production",service="nutsnews-worker-article-enrichment"} 0');
 
     await application.stop();
   });

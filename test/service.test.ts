@@ -185,8 +185,54 @@ describe("createEnrichmentService", () => {
       }
     });
     expect(JSON.stringify(readiness)).not.toContain("secret");
-    expect(metrics.collect()).toContain('nutsnews_worker_consumer_active{environment="production",service="enrichment",queue="nutsnews.worker.enrichment.v1"} 0');
-    expect(metrics.collect()).toContain('nutsnews_worker_expected_active{environment="production",service="enrichment"} 0');
+    expect(metrics.collect()).toContain('queue="nutsnews.worker.enrichment.v1",outcome="active"} 0');
+    expect(metrics.collect()).toContain('nutsnews_worker_expected_active{environment="production",service="nutsnews-worker-article-enrichment"} 0');
+
+    await service.stop();
+  });
+
+  it("fails closed when an injected production config bypasses the dependency-mode parser guard", async () => {
+    const parsedConfig = loadEnrichmentConfig({
+      HOSTNAME: "enrichment-injected-production-test",
+      NUTSNEWS_ENVIRONMENT: "test",
+      NUTSNEWS_ENRICHMENT_HTTP_PORT: "0",
+      NUTSNEWS_ENRICHMENT_TELEMETRY_LOGS: "silent"
+    });
+    const config = {
+      ...parsedConfig,
+      environment: "production"
+    };
+    const dependencies = createLocalEnrichmentDependencies();
+    const service = createEnrichmentService({
+      config,
+      dependencies
+    });
+
+    await service.start();
+
+    expect(service.consumer).toBeUndefined();
+    expect(service.broker.state).toBe("idle");
+    expect((dependencies.brokerTransport as LocalBrokerTransport).assertedRoutes).toHaveLength(0);
+
+    const startup = await service.health.startup();
+    const readiness = await service.health.readiness();
+
+    expect(startup.status).toBe("unhealthy");
+    expect(startup.checks.find((check) => check.name === "configuration-mode")).toMatchObject({
+      status: "unhealthy"
+    });
+    expect(readiness.status).toBe("unhealthy");
+    expect(readiness.checks.find((check) => check.name === "configuration-mode")).toMatchObject({
+      status: "unhealthy",
+      details: {
+        reason: "production-environment-requires-production-dependency-mode",
+        dependencyMode: "test"
+      }
+    });
+    await expect(service.processDelivery(createMinimalEnrichmentDelivery())).resolves.toMatchObject({
+      action: "retry",
+      reason: "production-durable-adapters-unhealthy"
+    });
 
     await service.stop();
   });

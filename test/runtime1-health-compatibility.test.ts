@@ -26,7 +26,13 @@ vi.mock("@ramideltoro/nutsnews-worker-runtime", async (importOriginal) => {
           runtime1Delegate.output = [
             "# HELP nutsnews_worker_health_probe Worker liveness, startup, and readiness state by probe and outcome.",
             "# TYPE nutsnews_worker_health_probe gauge",
-            'nutsnews_worker_health_probe{environment="production",host="backend-vps",service="nutsnews-worker-article-enrichment",version="1.0.0",outcome="degraded",probe="readiness"} 1'
+            'nutsnews_worker_health_probe{environment="production",host="backend-vps",service="nutsnews-worker-article-enrichment",version="1.0.0",outcome="degraded",probe="readiness"} 1',
+            "# HELP nutsnews_worker_health_check Worker dependency health state by bounded probe, check, and outcome.",
+            "# TYPE nutsnews_worker_health_check gauge",
+            'nutsnews_worker_health_check{environment="production",host="backend-vps",service="nutsnews-worker-article-enrichment",version="1.0.0",outcome="degraded",probe="readiness",check="enrichment-state"} 1',
+            "# HELP nutsnews_worker_health_check_duration_seconds Worker health-check duration in seconds.",
+            "# TYPE nutsnews_worker_health_check_duration_seconds histogram",
+            'nutsnews_worker_health_check_duration_seconds_bucket{environment="production",host="backend-vps",service="nutsnews-worker-article-enrichment",version="1.0.0",probe="readiness",check="enrichment-state",le="0.005"} 1'
           ].join("\n");
         }
       },
@@ -51,7 +57,7 @@ describe("Runtime1 health metric compatibility", () => {
     runtime1Delegate.output = "";
   });
 
-  it("keeps the service-owned health family singular while other events reach Runtime1", async () => {
+  it("keeps one compatibility probe family while forwarding Runtime-owned check metrics", async () => {
     const metrics = createEnrichmentPrometheusTelemetrySink({
       identity: {
         service: "nutsnews-worker-article-enrichment",
@@ -89,15 +95,23 @@ describe("Runtime1 health metric compatibility", () => {
     const healthSeries = healthSamples.map((line) => line.slice(0, line.lastIndexOf(" ")));
 
     expect(runtime1Delegate.emittedEventNames).toEqual([
+      "runtime.broker.consumer_state_changed",
+      "runtime.health.evaluated",
       "runtime.message.started"
     ]);
     expect(lines.filter((line) => line.startsWith("# HELP nutsnews_worker_health_probe "))).toHaveLength(1);
     expect(lines.filter((line) => line === "# TYPE nutsnews_worker_health_probe gauge")).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("# HELP nutsnews_worker_health_check "))).toHaveLength(1);
+    expect(lines.filter((line) => line === "# TYPE nutsnews_worker_health_check gauge")).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("# HELP nutsnews_worker_health_check_duration_seconds "))).toHaveLength(1);
+    expect(lines.filter((line) => line === "# TYPE nutsnews_worker_health_check_duration_seconds histogram")).toHaveLength(1);
     expect(healthSamples).toHaveLength(9);
     expect(new Set(healthSeries).size).toBe(healthSamples.length);
     expect(output).toContain(
       'nutsnews_worker_health_probe{environment="production",service="enrichment",probe="readiness",outcome="degraded"} 1'
     );
     expect(output).not.toContain('nutsnews_worker_health_probe{environment="production",host="backend-vps"');
+    expect(output).toContain('nutsnews_worker_health_check{environment="production",host="backend-vps"');
+    expect(output).toContain('nutsnews_worker_health_check_duration_seconds_bucket{environment="production",host="backend-vps"');
   });
 });

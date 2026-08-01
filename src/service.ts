@@ -123,9 +123,12 @@ export function createEnrichmentService(options: EnrichmentServiceOptions): Enri
   let consumer: BrokerConsumerHandle | undefined;
   let lifecycleGeneration = 0;
   let durabilityFailureDetected = false;
+  const reportConsumerActive = (activeConsumers: number): void => {
+    setConsumerActive(options.metrics, activeConsumers);
+  };
 
   const cancelConsumerForDurability = async (): Promise<void> => {
-    if (options.config.dependencyMode !== "production") {
+    if (options.config.dependencyMode !== "production" && !isProductionEnvironment(options.config.environment)) {
       return;
     }
 
@@ -133,12 +136,13 @@ export function createEnrichmentService(options: EnrichmentServiceOptions): Enri
     const activeConsumer = consumer;
 
     consumer = undefined;
-    setConsumerActive(options.metrics, 0);
     setHealthProbe(options.metrics, "readiness", "unhealthy");
 
     if (activeConsumer !== undefined) {
       await settleWithinBound(() => activeConsumer.cancel(), options.config.startupTimeoutMs);
     }
+
+    reportConsumerActive(0);
   };
   productionDurabilityFailureHandler = cancelConsumerForDurability;
   const ensureProductionDurability = async (): Promise<boolean> => {
@@ -154,7 +158,8 @@ export function createEnrichmentService(options: EnrichmentServiceOptions): Enri
     const startedAtMs = options.dependencies.clock.now().getTime();
 
     try {
-      if (options.config.dependencyMode === "production" && !(await ensureProductionDurability())) {
+      if ((options.config.dependencyMode === "production" || isProductionEnvironment(options.config.environment))
+        && !(await ensureProductionDurability())) {
         await emitRuntimeTelemetry(telemetry, {
           name: "runtime.message.started",
           level: "info",
@@ -195,9 +200,11 @@ export function createEnrichmentService(options: EnrichmentServiceOptions): Enri
           livenessCheck()
         ],
         startupChecks: [
-          startupCheck(() => started)
+          startupCheck(() => started),
+          configurationModeCheck(options.config)
         ],
         readinessChecks: [
+          configurationModeCheck(options.config),
           brokerReadinessCheck(broker),
           createBrokerConsumerReadinessCheck(broker, "enrichment"),
           dependencyReadinessCheck(
@@ -290,7 +297,7 @@ export function createEnrichmentService(options: EnrichmentServiceOptions): Enri
               if (consumer === wrappedConsumer) {
                 consumer = undefined;
               }
-              setConsumerActive(options.metrics, 0);
+              reportConsumerActive(0);
               setHealthProbe(options.metrics, "readiness", "unhealthy");
             }
           };
@@ -302,8 +309,12 @@ export function createEnrichmentService(options: EnrichmentServiceOptions): Enri
         setHealthProbe(options.metrics, "readiness", "unhealthy");
       }
       started = true;
-      setConsumerActive(options.metrics, consumer === undefined ? 0 : 1);
-      setHealthProbe(options.metrics, "startup", "ok");
+      reportConsumerActive(consumer === undefined ? 0 : 1);
+      setHealthProbe(
+        options.metrics,
+        "startup",
+        configurationModeValid(options.config) ? "ok" : "unhealthy"
+      );
       setInFlight(options.metrics, enrichmentRoute.mainQueue.name, drain.inFlight);
       await emitRuntimeTelemetry(telemetry, {
         name: "runtime.dependency.observed",
@@ -338,7 +349,7 @@ export function createEnrichmentService(options: EnrichmentServiceOptions): Enri
       await broker.stop("shutdown");
       setShutdownDraining(options.metrics, false);
       setInFlight(options.metrics, enrichmentRoute.mainQueue.name, drain.inFlight);
-      setConsumerActive(options.metrics, 0);
+      reportConsumerActive(0);
       setHealthProbe(options.metrics, "startup", "unhealthy");
       setHealthProbe(options.metrics, "readiness", "unhealthy");
       consumer = undefined;
@@ -369,6 +380,10 @@ function productionAdaptersAvailable(
   config: EnrichmentConfig,
   dependencies: EnrichmentDependencies
 ): boolean {
+  if (isProductionEnvironment(config.environment) && config.dependencyMode !== "production") {
+    return false;
+  }
+
   if (config.dependencyMode !== "production") {
     return true;
   }
@@ -384,6 +399,10 @@ async function productionAdaptersReady(
   config: EnrichmentConfig,
   dependencies: EnrichmentDependencies
 ): Promise<boolean> {
+  if (isProductionEnvironment(config.environment) && config.dependencyMode !== "production") {
+    return false;
+  }
+
   if (config.dependencyMode !== "production") {
     return true;
   }
@@ -814,6 +833,30 @@ function startupCheck(isStarted: () => boolean): RuntimeHealthCheck {
     critical: true,
     check: () => isStarted() ? "ok" : "unhealthy"
   };
+}
+
+function configurationModeCheck(config: EnrichmentConfig): RuntimeHealthCheck {
+  return {
+    name: "configuration-mode",
+    critical: true,
+    check: () => configurationModeValid(config)
+      ? "ok"
+      : {
+          status: "unhealthy",
+          details: {
+            reason: "production-environment-requires-production-dependency-mode",
+            dependencyMode: config.dependencyMode
+          }
+        }
+  };
+}
+
+function configurationModeValid(config: EnrichmentConfig): boolean {
+  return !isProductionEnvironment(config.environment) || config.dependencyMode === "production";
+}
+
+function isProductionEnvironment(environment: string): boolean {
+  return environment.trim().toLowerCase() === "production";
 }
 
 function brokerReadinessCheck(broker: BrokerLifecycle): RuntimeHealthCheck {

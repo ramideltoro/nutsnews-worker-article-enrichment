@@ -67,8 +67,8 @@ describe("enrichment HTTP endpoints", () => {
     expect(metricsResponse.status).toBe(200);
     const metricsBody = await metricsResponse.text();
     expect(metricsBody).not.toContain("nutsnews_worker_dependency_duration_ms");
-    expect(metricsBody).toContain('nutsnews_worker_expected_active{environment="local",service="enrichment"} 0');
-    expect(metricsBody).toContain('nutsnews_worker_consumer_active{environment="local",service="enrichment",queue="nutsnews.worker.enrichment.v1"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_expected_active{environment="local",service="nutsnews-worker-article-enrichment"} 0');
+    expect(metricsBody).toContain('queue="nutsnews.worker.enrichment.v1",outcome="active"} 1');
     expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="enrichment",probe="liveness",outcome="ok"} 1');
     expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="enrichment",probe="startup",outcome="ok"} 1');
     expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="enrichment",probe="readiness",outcome="ok"} 1');

@@ -21,7 +21,7 @@ The article enrichment service owns the worker-uplift service boundary that cons
 1. Validate value-free configuration and secret presence by variable name.
 2. Assert exact contracts/runtime package versions.
 3. Bind the HTTP diagnostics listener before attempting broker startup, bound startup with `NUTSNEWS_ENRICHMENT_STARTUP_TIMEOUT_MS`, and close diagnostics through an independently bounded cleanup path if startup fails.
-4. Verify that production state, transaction, and broker-outbox adapters all identify as `production` and pass bounded health probes; otherwise keep the broker idle and expose unhealthy readiness.
+4. Verify that a production environment also declares production dependency mode, then require production state, transaction, and broker-outbox adapters to identify as `production` and pass bounded health probes; otherwise keep the broker idle and expose unhealthy readiness.
 5. Start the shared broker lifecycle and assert enrichment/approval topology only when durable acknowledgement adapters are eligible.
 6. Register an `enrichment` consumer through the shared runtime message processor.
 7. Validate incoming envelopes and enrichment-stage payloads before delegated work.
@@ -66,7 +66,7 @@ Local doubles back tests and health probes without production dependencies. Thei
 
 Any future production state adapter must return a fresh opaque token from an atomic claim, compare that token for completion/failure/release, preserve completed records, atomically reclaim expired claims, and cap its claim lease at five minutes. The service-local conformance suite models ambiguous claim and completion responses, stale ownership, completed-record preservation, and lease expiry/reclaim. It does not admit a future PostgreSQL adapter: that implementation must pass the same cases against its real transaction boundary and prove that the whole operation finishes below the lease or renews ownership safely.
 
-`NUTSNEWS_ENVIRONMENT=production` also requires `NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE=production`; a missing or mistyped dependency mode cannot activate local in-memory acknowledgement state under a production environment label.
+`NUTSNEWS_ENVIRONMENT=production` also requires `NUTSNEWS_ENRICHMENT_DEPENDENCY_MODE=production`; a missing or mistyped dependency mode cannot activate local in-memory acknowledgement state under a production environment label. Both configuration parsing and the service readiness/startup boundary enforce this invariant so directly injected test dependencies also fail closed.
 
 ## Safety Bounds
 
@@ -78,8 +78,10 @@ Hostile fixtures cover redirect loops, metadata-address redirects, decompression
 
 `NUTSNEWS_ENRICHMENT_SHADOW_MODE` remains required so bootstrap deployment cannot become the production legacy ingestion path by accident.
 
-The shadow deployment exports `nutsnews_worker_expected_active=0`. Grafana consumer, missing-series, and freshness rules must gate on that signal until a protected backend cutover changes production ownership. Metric labels are limited to bounded operational dimensions; identifiers are retained only as structured log metadata.
+The shadow deployment exports Runtime-owned `nutsnews_worker_expected_active=0`. Runtime also owns the canonical consumer gauge and monotonically advances last-success time on accepted and duplicate work. Grafana consumer, missing-series, and freshness rules must gate on the ownership signal until a protected backend cutover changes production ownership. Metric labels are limited to bounded operational dimensions; identifiers are retained only as structured log metadata.
 
-Health gauges are one-hot and present before the first scrape: liveness initializes `ok`, startup and readiness initialize `unhealthy`, startup transitions with `start()`/`stop()`, and readiness is promoted only by the real readiness probe. Duration-less dependency events are kept out of the legacy runtime duration summary; only explicitly measured dependency durations may populate it.
+Health gauges are one-hot and present before the first scrape: liveness initializes `ok`, startup and readiness initialize `unhealthy`, startup transitions with `start()`/`stop()`, and readiness is promoted only by the real readiness probe. Evaluated health events are forwarded to Runtime `1.0.0` for allowlisted per-check state and duration histograms; the Runtime probe family is removed before collection so the compatibility probe family remains singular. Duration-less dependency events are kept out of the legacy runtime duration summary; only explicitly measured dependency durations may populate it.
 
 HTTP-first startup makes the initial fail-closed state observable while a broker connection is pending. Startup is time-bounded and raises a named error after the configured deadline; failed-startup cleanup closes the diagnostics listener concurrently and within its own bound even if transport shutdown never settles.
+
+The DNS policy checks protected literal and resolved addresses before the initial fetch and every redirect, but the HTTP client does not pin the validated address to the subsequent socket. DNS-rebinding-resistant resolution/connection pinning remains a production-readiness prerequisite; it is explicitly deferred while unavailable durable production adapters keep this service diagnostic-only.

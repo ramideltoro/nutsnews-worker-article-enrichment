@@ -123,7 +123,7 @@ describe("enrichment lifecycle telemetry", () => {
 
     const initialOutput = context.metrics.collect();
     const initialCanonicalSeries = canonicalStageSeriesKeys(initialOutput);
-    expect(initialCanonicalSeries).toHaveLength(22);
+    expect(initialCanonicalSeries).toHaveLength(24);
 
     for (const outcome of [
       "success",
@@ -149,7 +149,7 @@ describe("enrichment lifecycle telemetry", () => {
     expectHealthOneHot(initialOutput, "liveness", "ok");
     expectHealthOneHot(initialOutput, "startup", "unhealthy");
     expectHealthOneHot(initialOutput, "readiness", "unhealthy");
-    expect(sampleValue(initialOutput, "nutsnews_worker_consumer_active", {
+    expect(sampleValue(initialOutput, "nutsnews_worker_consumers", {
       queue: "nutsnews.worker.enrichment.v1"
     })).toBe(0);
 
@@ -168,7 +168,9 @@ describe("enrichment lifecycle telemetry", () => {
     const output = context.metrics.collect();
     expect(canonicalStageSeriesKeys(output)).toEqual(initialCanonicalSeries);
     expect(ENRICHMENT_STAGE_LATENCY_BUCKETS_SECONDS).toEqual([
+      0.005,
       0.01,
+      0.025,
       0.05,
       0.1,
       0.25,
@@ -196,11 +198,39 @@ describe("enrichment lifecycle telemetry", () => {
     })).toBe(6);
     expect(sampleValue(output, "nutsnews_worker_uplift_stage_latency_seconds_sum")).toBe(1);
     expect(sampleValue(output, "nutsnews_worker_uplift_stage_latency_seconds_count")).toBe(6);
-    expect(output).toContain('nutsnews_worker_expected_active{environment="test",service="enrichment"} 0');
+    expect(output).toContain('nutsnews_worker_expected_active{environment="test",service="nutsnews-worker-article-enrichment"} 0');
+    expect(sampleValue(output, "nutsnews_worker_last_success_timestamp_seconds")).toBe(
+      Math.floor(Date.parse("2026-07-23T00:00:00.500Z") / 1_000)
+    );
     expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="enrichment",probe="liveness",outcome="ok"} 1');
     expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="enrichment",probe="startup",outcome="ok"} 1');
     expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="enrichment",probe="readiness",outcome="ok"} 1');
-    expect(sampleValue(output, "nutsnews_worker_consumer_active", {
+    expect(output.split("\n").filter((line) => line.startsWith("# HELP nutsnews_worker_health_probe "))).toHaveLength(1);
+    expect(output.split("\n").filter((line) => line === "# TYPE nutsnews_worker_health_probe gauge")).toHaveLength(1);
+    expect(output.split("\n").filter((line) => line.startsWith("# HELP nutsnews_worker_health_check "))).toHaveLength(1);
+    expect(output.split("\n").filter((line) => line === "# TYPE nutsnews_worker_health_check gauge")).toHaveLength(1);
+    expect(output.split("\n").filter((line) => line.startsWith("# HELP nutsnews_worker_health_check_duration_seconds "))).toHaveLength(1);
+    expect(output.split("\n").filter((line) => line === "# TYPE nutsnews_worker_health_check_duration_seconds histogram")).toHaveLength(1);
+    expect(sampleValue(output, "nutsnews_worker_health_check", {
+      probe: "readiness",
+      check: "configuration-mode",
+      outcome: "ok"
+    })).toBe(1);
+    expect(sampleValue(output, "nutsnews_worker_health_check", {
+      probe: "readiness",
+      check: "http-client",
+      outcome: "ok"
+    })).toBe(1);
+    expect(sampleValue(output, "nutsnews_worker_health_check_duration_seconds_count", {
+      probe: "readiness",
+      check: "http-client"
+    })).toBe(1);
+    const consumerHealthDurationCount = sampleValue(output, "nutsnews_worker_health_check_duration_seconds_count", {
+      probe: "readiness",
+      check: "rabbitmq-consumer"
+    });
+    expect(output).not.toContain('check="other"');
+    expect(sampleValue(output, "nutsnews_worker_consumers", {
       queue: "nutsnews.worker.enrichment.v1"
     })).toBe(1);
     expect(output).not.toContain("nutsnews_worker_dependency_duration_ms");
@@ -226,11 +256,29 @@ describe("enrichment lifecycle telemetry", () => {
     }
 
     await context.service.consumer?.cancel();
+    const transitionOutput = context.metrics.collect();
+
+    expectHealthOneHot(transitionOutput, "readiness", "unhealthy");
+    expect(sampleValue(transitionOutput, "nutsnews_worker_health_check", {
+      probe: "readiness",
+      check: "rabbitmq-consumer",
+      outcome: "ok"
+    })).toBe(0);
+    expect(sampleValue(transitionOutput, "nutsnews_worker_health_check", {
+      probe: "readiness",
+      check: "rabbitmq-consumer",
+      outcome: "unhealthy"
+    })).toBe(1);
+    expect(sampleValue(transitionOutput, "nutsnews_worker_health_check_duration_seconds_count", {
+      probe: "readiness",
+      check: "rabbitmq-consumer"
+    })).toBe(consumerHealthDurationCount);
+
     const readiness = await context.service.health.readiness();
     expect(readiness.status).toBe("unhealthy");
     const unhealthyOutput = context.metrics.collect();
     expect(unhealthyOutput).toContain('nutsnews_worker_health_probe{environment="test",service="enrichment",probe="readiness",outcome="unhealthy"} 1');
-    expect(sampleValue(unhealthyOutput, "nutsnews_worker_consumer_active", {
+    expect(sampleValue(unhealthyOutput, "nutsnews_worker_consumers", {
       queue: "nutsnews.worker.enrichment.v1"
     })).toBe(0);
 
@@ -662,14 +710,6 @@ function expectedMetricLabelNames(line: string): readonly string[] {
       "service",
       "probe",
       "outcome"
-    ];
-  }
-
-  if (line.startsWith("nutsnews_worker_consumer_active{")) {
-    return [
-      "environment",
-      "service",
-      "queue"
     ];
   }
 

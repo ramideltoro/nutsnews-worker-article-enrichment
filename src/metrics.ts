@@ -8,7 +8,9 @@ import {
 } from "@ramideltoro/nutsnews-worker-runtime";
 
 export const ENRICHMENT_STAGE_LATENCY_BUCKETS_SECONDS = [
+  0.005,
   0.01,
+  0.025,
   0.05,
   0.1,
   0.25,
@@ -69,12 +71,42 @@ const HEALTH_OUTCOMES = [
   "degraded",
   "unhealthy"
 ] as const satisfies readonly EnrichmentHealthOutcome[];
+const ENRICHMENT_RUNTIME_DEPENDENCIES = [
+  "article-enrichment",
+  "article-enrichment-work-handler",
+  "local-enrichment-work-handler",
+  "enrichment-shell"
+] as const;
+const ENRICHMENT_RUNTIME_HEALTH_CHECKS = [
+  "process",
+  "service-started",
+  "configuration-mode",
+  "broker-lifecycle",
+  "rabbitmq-consumer",
+  "enrichment-state",
+  "database-transactions",
+  "broker-outbox",
+  "http-client",
+  "dns-policy",
+  "html-parser",
+  "production-adapters",
+  "shadow-mode"
+] as const;
 const MAX_LABEL_LENGTH = 96;
 
 export function createEnrichmentPrometheusTelemetrySink(
   options: EnrichmentPrometheusTelemetrySinkOptions
 ): EnrichmentPrometheusTelemetrySink {
-  const runtime = createPrometheusRuntimeTelemetrySink(options);
+  const runtime = createPrometheusRuntimeTelemetrySink({
+    ...options,
+    defaultQueue: options.defaultQueue ?? ENRICHMENT_MAIN_QUEUE,
+    cardinality: {
+      ...options.cardinality,
+      dependencies: options.cardinality?.dependencies ?? ENRICHMENT_RUNTIME_DEPENDENCIES,
+      healthChecks: options.cardinality?.healthChecks ?? ENRICHMENT_RUNTIME_HEALTH_CHECKS
+    },
+    expectedActive: options.expectedActive ?? false
+  });
   const environment = metricLabelValue(options.identity.environment);
   const counters = new Map<EnrichmentStageOutcome, number>(
     ENRICHMENT_STAGE_OUTCOMES.map((outcome) => [
@@ -98,14 +130,30 @@ export function createEnrichmentPrometheusTelemetrySink(
     ]
   ]);
   let consumerActive = 0;
+  let lastSuccessTimestampSeconds = -1;
   let latencyCount = 0;
   let latencySum = 0;
+
+  emitRuntimeConsumerState(runtime, consumerActive);
 
   return {
     allowedLabels: runtime.allowedLabels,
     async emit(event: RuntimeTelemetryEvent): Promise<void> {
       recordHealthEvent(health, event);
-      consumerActive = consumerActiveFromEvent(event) ?? consumerActive;
+      const observedConsumerActive = consumerActiveFromEvent(event);
+
+      if (observedConsumerActive !== undefined) {
+        consumerActive = observedConsumerActive;
+
+        if (consumerActive === 0) {
+          health.set("readiness", "unhealthy");
+        }
+      }
+      lastSuccessTimestampSeconds = updateRuntimeLastSuccess(
+        runtime,
+        event,
+        lastSuccessTimestampSeconds
+      );
       const outcome = enrichmentStageOutcome(event);
 
       if (outcome !== undefined) {
@@ -133,12 +181,13 @@ export function createEnrichmentPrometheusTelemetrySink(
       }
     },
     collect(): string {
-      const runtimeOutput = collectRuntimeMetrics(runtime);
+      const runtimeOutput = cohereRuntimeConsumerHealthCheck(
+        withoutRuntimeHealthProbeFamily(collectRuntimeMetrics(runtime)),
+        consumerActive
+      );
       const outputs = [
         runtimeOutput,
         collectCompatibilityIdentityMetrics(options, runtimeOutput),
-        collectExpectedActiveMetric(environment),
-        collectConsumerActiveMetric(environment, consumerActive),
         collectHealthProbeMetrics(environment, health),
         collectEnrichmentStageMetrics(environment, counters, bucketCounts, latencyCount, latencySum)
       ].filter((output) => output.length > 0);
@@ -152,7 +201,20 @@ export function createEnrichmentPrometheusTelemetrySink(
       runBestEffort(() => runtime.setShutdownDraining(draining));
     },
     setConsumerActive(activeConsumers): void {
-      consumerActive = Math.max(0, Math.floor(activeConsumers));
+      const normalized = Number.isFinite(activeConsumers)
+        ? Math.max(0, Math.floor(activeConsumers))
+        : 0;
+
+      if (normalized === 0) {
+        health.set("readiness", "unhealthy");
+      }
+
+      if (normalized === consumerActive) {
+        return;
+      }
+
+      consumerActive = normalized;
+      emitRuntimeConsumerState(runtime, consumerActive);
     },
     setHealthProbe(probe, outcome): void {
       health.set(probe, outcome);
@@ -212,6 +274,52 @@ function collectRuntimeMetrics(runtime: PrometheusRuntimeTelemetrySink): string 
   }
 }
 
+function withoutRuntimeHealthProbeFamily(output: string): string {
+  return output
+    .split("\n")
+    .filter((line) => !line.startsWith("# HELP nutsnews_worker_health_probe ")
+      && line !== "# TYPE nutsnews_worker_health_probe gauge"
+      && !line.startsWith("nutsnews_worker_health_probe{"))
+    .join("\n")
+    .trimEnd();
+}
+
+function cohereRuntimeConsumerHealthCheck(output: string, activeConsumers: number): string {
+  const expectedOutcome: EnrichmentHealthOutcome = activeConsumers > 0 ? "ok" : "unhealthy";
+  const lines = output.split("\n");
+  const observedOutcomes = new Set(lines
+    .filter(isRuntimeConsumerHealthCheckLine)
+    .flatMap((line) => HEALTH_OUTCOMES.filter((candidate) => line.includes(`outcome="${candidate}"`))));
+
+  if (!HEALTH_OUTCOMES.every((outcome) => observedOutcomes.has(outcome))) {
+    return output.trimEnd();
+  }
+
+  return lines
+    .map((line) => {
+      if (!isRuntimeConsumerHealthCheckLine(line)) {
+        return line;
+      }
+
+      const outcome = HEALTH_OUTCOMES.find((candidate) => line.includes(`outcome="${candidate}"`));
+      const sampleSeparator = line.lastIndexOf(" ");
+
+      if (outcome === undefined || sampleSeparator < 0) {
+        return line;
+      }
+
+      return `${line.slice(0, sampleSeparator)} ${outcome === expectedOutcome ? "1" : "0"}`;
+    })
+    .join("\n")
+    .trimEnd();
+}
+
+function isRuntimeConsumerHealthCheckLine(line: string): boolean {
+  return line.startsWith("nutsnews_worker_health_check{")
+    && line.includes('probe="readiness"')
+    && line.includes('check="rabbitmq-consumer"');
+}
+
 function runBestEffort(operation: () => unknown): void {
   try {
     const result = operation();
@@ -229,10 +337,6 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 }
 
 function shouldForwardToRuntime(event: RuntimeTelemetryEvent): boolean {
-  if (event.name === "runtime.health.evaluated") {
-    return false;
-  }
-
   if (event.name !== "runtime.dependency.observed") {
     return true;
   }
@@ -241,6 +345,48 @@ function shouldForwardToRuntime(event: RuntimeTelemetryEvent): boolean {
 
   return (event.durationMs !== undefined && Number.isFinite(event.durationMs))
     || (typeof attributeDuration === "number" && Number.isFinite(attributeDuration));
+}
+
+function updateRuntimeLastSuccess(
+  runtime: PrometheusRuntimeTelemetrySink,
+  event: RuntimeTelemetryEvent,
+  currentTimestampSeconds: number
+): number {
+  if ((event.name !== "runtime.message.accepted" && event.name !== "runtime.message.duplicate")
+    || event.stage !== "enrichment"
+    || (event.queue !== undefined && event.queue !== ENRICHMENT_MAIN_QUEUE)) {
+    return currentTimestampSeconds;
+  }
+
+  const timestampSeconds = Math.floor(Date.parse(event.at) / 1_000);
+
+  if (!Number.isFinite(timestampSeconds) || timestampSeconds < 0 || timestampSeconds <= currentTimestampSeconds) {
+    return currentTimestampSeconds;
+  }
+
+  try {
+    runtime.setLastSuccessTimestamp(timestampSeconds);
+    return timestampSeconds;
+  } catch {
+    return currentTimestampSeconds;
+  }
+}
+
+function emitRuntimeConsumerState(
+  runtime: PrometheusRuntimeTelemetrySink,
+  activeConsumers: number
+): void {
+  runBestEffort(() => runtime.emit({
+    name: "runtime.broker.consumer_state_changed",
+    level: activeConsumers > 0 ? "info" : "warn",
+    at: new Date().toISOString(),
+    stage: "enrichment",
+    queue: ENRICHMENT_MAIN_QUEUE,
+    outcome: activeConsumers > 0 ? "active" : "inactive",
+    attributes: {
+      activeConsumers
+    }
+  }));
 }
 
 function recordHealthEvent(
@@ -257,29 +403,6 @@ function recordHealthEvent(
   if (isHealthProbe(probe) && isHealthOutcome(outcome)) {
     health.set(probe, outcome);
   }
-}
-
-function collectExpectedActiveMetric(environment: string): string {
-  return [
-    "# HELP nutsnews_worker_expected_active Whether this worker deployment is expected to own active production work.",
-    "# TYPE nutsnews_worker_expected_active gauge",
-    `nutsnews_worker_expected_active${labels({
-      environment,
-      service: ENRICHMENT_STAGE_SERVICE
-    })} 0`
-  ].join("\n");
-}
-
-function collectConsumerActiveMetric(environment: string, activeConsumers: number): string {
-  return [
-    "# HELP nutsnews_worker_consumer_active Active enrichment main-queue consumers reported by the service.",
-    "# TYPE nutsnews_worker_consumer_active gauge",
-    `nutsnews_worker_consumer_active${labels({
-      environment,
-      service: ENRICHMENT_STAGE_SERVICE,
-      queue: ENRICHMENT_MAIN_QUEUE
-    })} ${formatMetricNumber(activeConsumers)}`
-  ].join("\n");
 }
 
 function consumerActiveFromEvent(event: RuntimeTelemetryEvent): number | undefined {
