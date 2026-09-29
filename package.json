@@ -43,7 +43,7 @@
     "@ramideltoro/nutsnews-worker-runtime": "1.0.0",
     "amqplib": "^2.0.1",
     "pg": "^8.22.0",
-    "undici": "^7.29.0"
+    "undici": "^7.29.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",
